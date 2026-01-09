@@ -357,44 +357,113 @@ class RegistrationManager {
       } catch (error) {
         this.sendLog('warn', `Failed to scroll to top: ${error.message}`);
       }
-      await this.sleep(1500);
+      
+      // Wait for content to load after scrolling
+      this.sendLog('info', 'Waiting for content to load after scrolling...');
+      await this.sleep(2000);
 
       // Check for event links (use same logic as scraping)
       this.sendLog('info', 'Looking for event links...');
       const checkLinks = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: function () {
-          // Find all links that could be events
-          const allLinks = document.querySelectorAll('a[href*="lu.ma"], a[href*="luma.com"]');
+          // Find all links - check both absolute and relative URLs
+          const allLinks = document.querySelectorAll('a[href]');
+          console.log('[Luma Auto Register] Total links on page: ' + allLinks.length);
           let eventCount = 0;
+          let lumaLinks = 0;
+          const sampleLinks = [];
+          const allSampleHrefs = [];
 
           for (let i = 0; i < allLinks.length; i++) {
-            const href = allLinks[i].getAttribute('href') || '';
-            // Count as event if it matches event URL pattern
-            if (href.match(/\/([a-zA-Z0-9_-]+)(?:\?|$|#)/) &&
-              !href.includes('/calendar') &&
-              !href.includes('/profile') &&
-              !href.includes('BP-SideEvents') &&
-              href !== 'https://lu.ma/' &&
-              href !== 'https://luma.com/') {
-              eventCount++;
+            const link = allLinks[i];
+            // Use href property which resolves relative URLs to absolute
+            const href = link.href || link.getAttribute('href') || '';
+            const hrefAttr = link.getAttribute('href') || '';
+            
+            // Check if it's a Luma link (absolute or relative)
+            const isLumaLink = href.includes('lu.ma') || href.includes('luma.com') || 
+                              (hrefAttr.startsWith('/') && !hrefAttr.startsWith('//'));
+            
+            if (isLumaLink) {
+              lumaLinks++;
+              if (allSampleHrefs.length < 10) {
+                allSampleHrefs.push({ href: href, hrefAttr: hrefAttr });
+              }
+              
+              // For relative URLs, check if they look like event paths
+              // For absolute URLs, use existing pattern
+              let isEventLink = false;
+              
+              if (href.includes('lu.ma') || href.includes('luma.com')) {
+                // Absolute URL - check pattern
+                if (href.match(/\/([a-zA-Z0-9_-]+)(?:\?|$|#)/) &&
+                  !href.includes('/calendar') &&
+                  !href.includes('/profile') &&
+                  !href.includes('BP-SideEvents') &&
+                  !href.includes('/settings') &&
+                  !href.includes('/about') &&
+                  href !== 'https://lu.ma/' &&
+                  href !== 'https://luma.com/') {
+                  isEventLink = true;
+                }
+              } else if (hrefAttr.startsWith('/') && hrefAttr.length > 1) {
+                // Relative URL - check if it looks like an event path
+                const pathMatch = hrefAttr.match(/^\/([a-zA-Z0-9_-]+)(?:\?|$|#)/);
+                if (pathMatch && 
+                  !hrefAttr.includes('/calendar') &&
+                  !hrefAttr.includes('/profile') &&
+                  !hrefAttr.includes('/settings') &&
+                  !hrefAttr.includes('/about')) {
+                  isEventLink = true;
+                }
+              }
+              
+              if (isEventLink) {
+                eventCount++;
+                if (sampleLinks.length < 5) {
+                  sampleLinks.push({ href: href, hrefAttr: hrefAttr });
+                }
+              }
             }
           }
 
+          console.log('[Luma Auto Register] Luma links found: ' + lumaLinks + ', Event links: ' + eventCount);
+          if (allSampleHrefs.length > 0) {
+            console.log('[Luma Auto Register] Sample Luma hrefs:', allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5));
+          }
+          
           return {
             eventLinks: eventCount,
-            totalLinks: allLinks.length,
+            totalLinks: lumaLinks,
+            allLinks: allLinks.length,
             // Also check for .event-link for backwards compatibility
-            eventLinkClass: document.querySelectorAll('a.event-link').length
+            eventLinkClass: document.querySelectorAll('a.event-link').length,
+            sampleLinks: sampleLinks,
+            allSampleHrefs: allSampleHrefs.slice(0, 10)
           };
         }
       });
 
       const result = checkLinks[0]?.result || { eventLinks: 0, totalLinks: 0 };
-      this.sendLog('info', `Found ${result.eventLinks} event links (${result.totalLinks} total Luma links)`);
+      this.sendLog('info', `Found ${result.eventLinks} event links (${result.totalLinks} total Luma links, ${result.allLinks || 0} total links on page)`);
+      
+      // Log sample links for debugging
+      if (result.sampleLinks && result.sampleLinks.length > 0) {
+        this.sendLog('info', `Sample event links: ${result.sampleLinks.map(l => l.href || l.hrefAttr).join(', ')}`);
+      }
+      if (result.allSampleHrefs && result.allSampleHrefs.length > 0) {
+        this.sendLog('info', `Sample Luma hrefs: ${result.allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5).join(', ')}`);
+      }
 
       if (result.eventLinks === 0) {
         this.sendLog('error', 'No event links found. Make sure you\'re on a Luma calendar page.');
+        if (result.totalLinks === 0) {
+          this.sendLog('info', 'No Luma links detected at all. The page may use a different structure.');
+          if (result.allSampleHrefs && result.allSampleHrefs.length > 0) {
+            this.sendLog('info', `However, found these hrefs that might be Luma links: ${result.allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5).join(', ')}`);
+          }
+        }
         try {
           chrome.runtime.sendMessage({
             type: 'SCAN_COMPLETE',
@@ -425,23 +494,63 @@ class RegistrationManager {
 
           // Find all event links - try multiple selectors
           var eventLinks = document.querySelectorAll('a.event-link');
-          // Also find links by href pattern (more reliable for Luma pages)
-          var allLumaLinks = document.querySelectorAll('a[href*="lu.ma"], a[href*="luma.com"]');
+          // Also find all links and filter for Luma events (handles both absolute and relative URLs)
+          var allLinks = document.querySelectorAll('a[href]');
 
           // Combine and deduplicate
           var linkMap = new Map();
+          
+          // Add .event-link elements
           for (var idx = 0; idx < eventLinks.length; idx++) {
-            linkMap.set(eventLinks[idx].href, eventLinks[idx]);
+            var href = eventLinks[idx].href || eventLinks[idx].getAttribute('href') || '';
+            if (href) {
+              linkMap.set(href, eventLinks[idx]);
+            }
           }
-          for (var idx2 = 0; idx2 < allLumaLinks.length; idx2++) {
-            var href = allLumaLinks[idx2].getAttribute('href') || '';
-            if (href.match(/\/([a-zA-Z0-9_-]+)(?:\?|$|#)/) &&
-              !href.includes('/calendar') &&
-              !href.includes('/profile') &&
-              !href.includes('BP-SideEvents') &&
-              href !== 'https://lu.ma/' &&
-              href !== 'https://luma.com/') {
-              linkMap.set(href, allLumaLinks[idx2]);
+          
+          // Process all links to find Luma event links
+          for (var idx2 = 0; idx2 < allLinks.length; idx2++) {
+            var link = allLinks[idx2];
+            var href = link.href || ''; // Use href property which resolves relative URLs
+            var hrefAttr = link.getAttribute('href') || '';
+            
+            // Check if it's a Luma link
+            var isLumaLink = href.includes('lu.ma') || href.includes('luma.com') || 
+                            (hrefAttr.startsWith('/') && !hrefAttr.startsWith('//'));
+            
+            if (isLumaLink) {
+              var isEventLink = false;
+              
+              // Check absolute URLs
+              if (href.includes('lu.ma') || href.includes('luma.com')) {
+                if (href.match(/\/([a-zA-Z0-9_-]+)(?:\?|$|#)/) &&
+                  !href.includes('/calendar') &&
+                  !href.includes('/profile') &&
+                  !href.includes('BP-SideEvents') &&
+                  !href.includes('/settings') &&
+                  !href.includes('/about') &&
+                  href !== 'https://lu.ma/' &&
+                  href !== 'https://luma.com/') {
+                  isEventLink = true;
+                }
+              } 
+              // Check relative URLs
+              else if (hrefAttr.startsWith('/') && hrefAttr.length > 1) {
+                var pathMatch = hrefAttr.match(/^\/([a-zA-Z0-9_-]+)(?:\?|$|#)/);
+                if (pathMatch && 
+                  !hrefAttr.includes('/calendar') &&
+                  !hrefAttr.includes('/profile') &&
+                  !hrefAttr.includes('/settings') &&
+                  !hrefAttr.includes('/about')) {
+                  isEventLink = true;
+                  // Resolve relative URL to absolute for consistency
+                  href = window.location.origin + hrefAttr;
+                }
+              }
+              
+              if (isEventLink && href) {
+                linkMap.set(href, link);
+              }
             }
           }
 
@@ -459,7 +568,9 @@ class RegistrationManager {
           // Process each link
           for (var i = 0; i < eventLinks.length; i++) {
             var link = eventLinks[i];
+            // Use href property which resolves relative URLs, fallback to attribute
             var href = link.href || link.getAttribute('href') || '';
+            var hrefAttr = link.getAttribute('href') || '';
 
             if (i < 5) {
               console.log('[Luma Auto Register] Processing: ' + href);
@@ -473,11 +584,29 @@ class RegistrationManager {
               continue;
             }
 
-            // Extract event ID
-            var match = href.match(/(?:lu\.ma|luma\.com)\/([a-zA-Z0-9_-]+)(?:\?|$|#)/);
+            // Extract event ID - handle both absolute URLs and relative URLs
+            var match = null;
+            // Try absolute URL pattern first
+            match = href.match(/(?:lu\.ma|luma\.com)\/([a-zA-Z0-9_-]+)(?:\?|$|#)/);
+            // If no match and href is from current origin, try relative pattern
+            if (!match && (href.startsWith(window.location.origin) || hrefAttr.startsWith('/'))) {
+              var pathToMatch = hrefAttr.startsWith('/') ? hrefAttr : href.replace(window.location.origin, '');
+              match = pathToMatch.match(/^\/([a-zA-Z0-9_-]+)(?:\?|$|#)/);
+            }
+            
             if (match && match[1]) {
               var eventId = match[1];
               var title = 'Event ' + eventId;
+
+              // Ensure href is an absolute URL
+              var absoluteUrl = href;
+              if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
+                if (hrefAttr.startsWith('/')) {
+                  absoluteUrl = window.location.origin + hrefAttr;
+                } else {
+                  absoluteUrl = window.location.origin + '/' + hrefAttr;
+                }
+              }
 
               // Try to get title
               var parent = link.closest('div');
@@ -508,7 +637,7 @@ class RegistrationManager {
               // Add event
               var exists = false;
               for (var k = 0; k < events.length; k++) {
-                if (events[k].url === href) {
+                if (events[k].url === absoluteUrl) {
                   exists = true;
                   break;
                 }
@@ -517,7 +646,7 @@ class RegistrationManager {
               if (!exists) {
                 events.push({
                   title: title,
-                  url: href,
+                  url: absoluteUrl,
                   eventId: eventId
                 });
                 debugInfo.foundEvents.push({ title: title });
