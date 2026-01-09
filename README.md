@@ -303,4 +303,6 @@ MIT License - See LICENSE file for details
 
 ---
 
+**Last Updated:** January 9, 2026
+
 Made with ❤️ for busy event-goers
