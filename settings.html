@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Luma Auto Register - Settings</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      opacity: 0.9;
+      font-size: 16px;
+    }
+
+    .content {
+      padding: 30px;
+    }
+
+    .section {
+      margin-bottom: 30px;
+      padding-bottom: 30px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    .section:last-child {
+      border-bottom: none;
+    }
+
+    .section h2 {
+      color: #374151;
+      margin-bottom: 10px;
+      font-size: 20px;
+    }
+
+    .section p {
+      color: #6b7280;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      color: #374151;
+      font-weight: 500;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    input[type="text"],
+    input[type="url"],
+    textarea,
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    input[type="text"]:focus,
+    input[type="url"]:focus,
+    textarea:focus,
+    select:focus {
+      outline: none;
+      border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    input[type="checkbox"] {
+      margin-right: 10px;
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+
+    .help-text {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 5px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      padding: 20px 30px;
+      background: #f8f9fa;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #667eea;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #5568d3;
+    }
+
+    .btn-secondary {
+      background: #6b7280;
+      color: white;
+    }
+
+    .btn-secondary:hover {
+      background: #4b5563;
+    }
+
+    .alert {
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    .alert-success {
+      background: #d1fae5;
+      color: #065f46;
+      border: 1px solid #6ee7b7;
+    }
+
+    .alert-info {
+      background: #dbeafe;
+      color: #1e40af;
+      border: 1px solid #93c5fd;
+    }
+
+    .alert-error {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fca5a5;
+    }
+
+    .required {
+      color: #ef4444;
+      margin-left: 4px;
+    }
+
+    .field-wrapper {
+      position: relative;
+    }
+
+    .tooltip-icon {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      margin-left: 6px;
+      cursor: help;
+      color: #6b7280;
+      vertical-align: middle;
+      position: relative;
+    }
+
+    .tooltip-icon:hover .tooltip-text {
+      visibility: visible;
+      opacity: 1;
+    }
+
+    .tooltip-text {
+      visibility: hidden;
+      opacity: 0;
+      position: absolute;
+      bottom: 125%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #1f2937;
+      color: #fff;
+      text-align: left;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      white-space: nowrap;
+      z-index: 1000;
+      width: 250px;
+      white-space: normal;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      transition: opacity 0.3s;
+    }
+
+    .tooltip-text::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 5px solid transparent;
+      border-top-color: #1f2937;
+    }
+
+    .example-text {
+      font-size: 12px;
+      color: #6b7280;
+      font-style: italic;
+      margin-top: 4px;
+    }
+
+    .field-status {
+      display: inline-block;
+      margin-left: 8px;
+      font-size: 12px;
+    }
+
+    .field-status.valid {
+      color: #10b981;
+    }
+
+    .field-status.invalid {
+      color: #ef4444;
+    }
+
+    .onboarding-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      z-index: 10000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .onboarding-overlay.active {
+      display: flex;
+    }
+
+    .onboarding-modal {
+      background: white;
+      border-radius: 12px;
+      max-width: 600px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      animation: slideIn 0.3s ease-out;
+    }
+
+    @keyframes slideIn {
+      from {
+        transform: translateY(-20px);
+        opacity: 0;
+      }
+      to {
+        transform: translateY(0);
+        opacity: 1;
+      }
+    }
+
+    .onboarding-header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      border-radius: 12px 12px 0 0;
+      text-align: center;
+    }
+
+    .onboarding-content {
+      padding: 30px;
+    }
+
+    .onboarding-step {
+      margin-bottom: 25px;
+    }
+
+    .onboarding-step h3 {
+      color: #374151;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .onboarding-step-number {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      background: #667eea;
+      color: white;
+      border-radius: 50%;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .onboarding-footer {
+      padding: 20px 30px;
+      background: #f8f9fa;
+      border-radius: 0 0 12px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .skip-link {
+      color: #6b7280;
+      cursor: pointer;
+      text-decoration: underline;
+      background: none;
+      border: none;
+      font-size: 14px;
+    }
+
+    .skip-link:hover {
+      color: #374151;
+    }
+  </style>
+</head>
+<body>
+  <!-- Onboarding Modal -->
+  <div id="onboardingOverlay" class="onboarding-overlay">
+    <div class="onboarding-modal">
+      <div class="onboarding-header">
+        <h1 style="margin: 0 0 10px 0; font-size: 28px;">🎉 Welcome to Luma Auto Register!</h1>
+        <p style="opacity: 0.9; margin: 0;">Let's get you set up in just a few steps</p>
+      </div>
+      <div class="onboarding-content">
+        <div class="onboarding-step">
+          <h3><span class="onboarding-step-number">1</span> Fill in Your Information</h3>
+          <p style="color: #6b7280; line-height: 1.6;">Fill out the fields below with your default information. The extension will use these to automatically fill registration forms. You can always update them later.</p>
+        </div>
+        <div class="onboarding-step">
+          <h3><span class="onboarding-step-number">2</span> Required vs Optional</h3>
+          <p style="color: #6b7280; line-height: 1.6;">Fields marked with <span class="required">*</span> are highly recommended. The more you fill, the better the automation works. Hover over the <span style="color: #6b7280;">ℹ️</span> icons for helpful tips.</p>
+        </div>
+        <div class="onboarding-step">
+          <h3><span class="onboarding-step-number">3</span> How It Works</h3>
+          <p style="color: #6b7280; line-height: 1.6;">When you scan a Luma calendar page, the extension will automatically fill forms using your saved information. It's smart enough to match fields like "Country of Residence" to your country setting!</p>
+        </div>
+        <div class="onboarding-step">
+          <h3><span class="onboarding-step-number">4</span> Save & Start</h3>
+          <p style="color: #6b7280; line-height: 1.6;">Click "Save Settings" when you're done. Then open the extension popup on any Luma calendar page to start auto-registering for events!</p>
+        </div>
+      </div>
+      <div class="onboarding-footer">
+        <button class="btn btn-primary" id="startOnboarding" style="width: 100%;">Got it, let's go! →</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="header">
+      <h1>⚙️ Settings</h1>
+      <p>Configure your default registration information</p>
+      <button id="showGuideBtn" class="btn btn-secondary" style="margin-top: 15px; font-size: 13px; padding: 8px 16px;">
+        📖 Show Getting Started Guide
+      </button>
+    </div>
+
+    <div class="content">
+      <div id="saveAlert" class="alert alert-success" style="display: none;">
+        ✓ Settings saved successfully!
+      </div>
+
+      <div class="alert alert-info">
+        <strong>💡 How it works:</strong> The extension will automatically fill these fields when registering for events. This saves time and enables automatic registration for events with required information.
+        <div style="margin-top: 8px;">
+          <button id="showGuideBtn2" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3);">
+            📖 View Getting Started Guide
+          </button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Basic Information</h2>
+        <p>Your name and contact details</p>
+
+        <div class="form-group">
+          <label for="firstName">
+            First Name
+            <span class="required">*</span>
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your first name. This is used for "First Name" fields in registration forms. Required for most events.</span>
+            </span>
+          </label>
+          <input type="text" id="firstName" placeholder="John">
+          <div class="example-text">Example: John</div>
+          <span class="field-status" id="firstNameStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="lastName">
+            Last Name
+            <span class="required">*</span>
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your last name. This is used for "Last Name" fields in registration forms. Required for most events.</span>
+            </span>
+          </label>
+          <input type="text" id="lastName" placeholder="Doe">
+          <div class="example-text">Example: Doe</div>
+          <span class="field-status" id="lastNameStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="email">
+            Email
+            <span class="required">*</span>
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your email address. Usually auto-filled by Luma if you're logged in, but having it here ensures it's always available. Required for all registrations.</span>
+            </span>
+          </label>
+          <input type="text" id="email" placeholder="john@example.com">
+          <div class="example-text">Example: john.doe@example.com</div>
+          <span class="field-status" id="emailStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="phone">
+            Phone Number
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your phone number. Some events require this for contact purposes. Include country code if needed (e.g., +1 for US/Canada).</span>
+            </span>
+          </label>
+          <input type="text" id="phone" placeholder="+1 (555) 123-4567">
+          <div class="example-text">Example: +1 (555) 123-4567 or +44 20 1234 5678</div>
+          <span class="field-status" id="phoneStatus"></span>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Social Profiles</h2>
+        <p>Your social media handles (without @ symbol)</p>
+
+        <div class="form-group">
+          <label for="twitter">X (Twitter) Handle</label>
+          <input type="text" id="twitter" placeholder="yourusername">
+        </div>
+
+        <div class="form-group">
+          <label for="instagram">Instagram Handle</label>
+          <input type="text" id="instagram" placeholder="yourusername">
+        </div>
+
+        <div class="form-group">
+          <label for="linkedin">LinkedIn URL</label>
+          <input type="url" id="linkedin" placeholder="https://linkedin.com/in/yourprofile">
+        </div>
+
+        <div class="form-group">
+          <label for="youtube">YouTube Channel URL</label>
+          <input type="url" id="youtube" placeholder="https://youtube.com/@yourchannel">
+        </div>
+
+        <div class="form-group">
+          <label for="telegram">
+            Telegram Handle
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your Telegram username without the @ symbol. Used for "What's your Telegram handle?" type questions. Many Web3 events ask for this.</span>
+            </span>
+          </label>
+          <input type="text" id="telegram" placeholder="yourusername">
+          <div class="example-text">Example: johndoe (without @)</div>
+          <span class="field-status" id="telegramStatus"></span>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Professional Information</h2>
+        <p>Your work and professional details</p>
+
+        <div class="form-group">
+          <label for="company">
+            Company Name
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your company or organization name. Used for "Company", "Organization", "Project(s)/Company/DAOs" type fields.</span>
+            </span>
+          </label>
+          <input type="text" id="company" placeholder="Acme Inc.">
+          <div class="example-text">Example: Acme Inc. or Your Startup Name</div>
+          <span class="field-status" id="companyStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="companyWebsite">
+            Company Website
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your company's website URL. Used for "Company Website", "Company URL", or similar fields in registration forms.</span>
+            </span>
+          </label>
+          <input type="url" id="companyWebsite" placeholder="https://company.com">
+          <div class="example-text">Example: https://acme.com or https://yourstartup.com</div>
+          <span class="field-status" id="companyWebsiteStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="title">
+            Job Title
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your job title or role. The extension will try to match this to dropdown options like "C-Level (CEO, CTO, CMO, etc.)" if you enter "CEO".</span>
+            </span>
+          </label>
+          <input type="text" id="title" placeholder="Software Engineer">
+          <div class="example-text">Example: CEO, Software Engineer, Product Manager</div>
+          <span class="field-status" id="titleStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="website">Personal Website</label>
+          <input type="url" id="website" placeholder="https://yourwebsite.com">
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Location & Demographics</h2>
+        <p>Your location and personal information</p>
+
+        <div class="form-group">
+          <label for="country">
+            Country
+            <span class="required">*</span>
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Your country of residence. The extension will automatically match this to "Country of Residence" or similar fields in registration forms. Required for many events.</span>
+            </span>
+          </label>
+          <select id="country">
+            <option value="">Select Country</option>
+            <option value="US">United States</option>
+            <option value="CA">Canada</option>
+            <option value="UK">United Kingdom</option>
+            <option value="DE">Germany</option>
+            <option value="FR">France</option>
+            <option value="OTHER">Other</option>
+          </select>
+          <div class="example-text">The extension will match "CA" to "Canada" in dropdown menus</div>
+          <span class="field-status" id="countryStatus"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="city">City</label>
+          <input type="text" id="city" placeholder="New York">
+        </div>
+
+        <div class="form-group">
+          <label for="timezone">Time Zone</label>
+          <select id="timezone">
+            <option value="">Select Time Zone</option>
+            <option value="America/New_York">Eastern Time (ET)</option>
+            <option value="America/Chicago">Central Time (CT)</option>
+            <option value="America/Denver">Mountain Time (MT)</option>
+            <option value="America/Los_Angeles">Pacific Time (PT)</option>
+            <option value="America/Toronto">Eastern Canada</option>
+            <option value="America/Vancouver">Pacific Canada</option>
+            <option value="Europe/London">London (GMT)</option>
+            <option value="Europe/Berlin">Berlin (CET)</option>
+            <option value="Europe/Paris">Paris (CET)</option>
+            <option value="Asia/Tokyo">Tokyo (JST)</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="pronouns">Pronouns</label>
+          <select id="pronouns">
+            <option value="">Select Pronouns</option>
+            <option value="He/Him">He/Him</option>
+            <option value="She/Her">She/Her</option>
+            <option value="They/Them">They/Them</option>
+            <option value="Prefer not to say">Prefer not to say</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Professional Details</h2>
+        <p>Your professional background and experience</p>
+
+        <div class="form-group">
+          <label for="industryCategory">Industry Category</label>
+          <select id="industryCategory">
+            <option value="">Select Industry</option>
+            <option value="Technology">Technology</option>
+            <option value="Finance">Finance</option>
+            <option value="Healthcare">Healthcare</option>
+            <option value="Education">Education</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="experienceLevel">Experience Level</label>
+          <select id="experienceLevel">
+            <option value="">Select Experience Level</option>
+            <option value="Beginner">Beginner</option>
+            <option value="Intermediate">Intermediate</option>
+            <option value="Advanced">Advanced</option>
+            <option value="Expert">Expert</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="roleCategory">Current Role Category</label>
+          <select id="roleCategory">
+            <option value="">Select Role</option>
+            <option value="Founder">Founder</option>
+            <option value="Developer">Developer</option>
+            <option value="Designer">Designer</option>
+            <option value="Investor">Investor</option>
+            <option value="Student">Student</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="yearsExperience">Years of Experience</label>
+          <select id="yearsExperience">
+            <option value="">Select Years</option>
+            <option value="0-2">0-2 years</option>
+            <option value="3-5">3-5 years</option>
+            <option value="6-10">6-10 years</option>
+            <option value="10+">10+ years</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Event-Specific Information</h2>
+        <p>Common questions asked during event registration</p>
+
+        <div class="form-group">
+          <label for="howDidYouHear">How did you hear about us?</label>
+          <input type="text" id="howDidYouHear" placeholder="Social Media" value="Social Media">
+        </div>
+
+        <div class="form-group">
+          <label for="dietaryRestrictions">Dietary Restrictions</label>
+          <input type="text" id="dietaryRestrictions" placeholder="None" value="None">
+        </div>
+
+        <div class="form-group">
+          <label for="tshirtSize">T-Shirt Size</label>
+          <select id="tshirtSize">
+            <option value="">Select Size</option>
+            <option value="XS">XS</option>
+            <option value="S">S</option>
+            <option value="M">M</option>
+            <option value="L">L</option>
+            <option value="XL">XL</option>
+            <option value="XXL">XXL</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="accessibilityNeeds">Accessibility Needs</label>
+          <textarea id="accessibilityNeeds" placeholder="Leave blank if none"></textarea>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Crypto / Web3 Information</h2>
+        <p>Blockchain and cryptocurrency related fields</p>
+
+        <div class="form-group">
+          <label for="cryptoExperience">Crypto Experience</label>
+          <select id="cryptoExperience">
+            <option value="">Select Experience</option>
+            <option value="Beginner">Beginner</option>
+            <option value="Intermediate">Intermediate</option>
+            <option value="Advanced">Advanced</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="primaryInterest">Primary Interest</label>
+          <select id="primaryInterest">
+            <option value="">Select Interest</option>
+            <option value="DeFi">DeFi</option>
+            <option value="NFTs">NFTs</option>
+            <option value="DAOs">DAOs</option>
+            <option value="Infrastructure">Infrastructure</option>
+            <option value="Trading">Trading</option>
+            <option value="General">General</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="involvementLevel">Involvement Level</label>
+          <select id="involvementLevel">
+            <option value="">Select Level</option>
+            <option value="Curious">Curious</option>
+            <option value="Active User">Active User</option>
+            <option value="Builder">Builder</option>
+            <option value="Investor">Investor</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Additional Information</h2>
+        <p>Default answers for common questions</p>
+
+        <div class="form-group">
+          <label for="bio">Short Bio / About You</label>
+          <textarea id="bio" placeholder="Brief description about yourself (1-2 sentences)"></textarea>
+          <div class="help-text">Used for "Tell us about yourself" or similar questions</div>
+        </div>
+
+        <div class="form-group">
+          <label for="interests">Interests / Why Attending</label>
+          <textarea id="interests" placeholder="What you're interested in or why you're attending"></textarea>
+          <div class="help-text">Used for "Why do you want to attend?" type questions</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Generic Catch-All Answer</h2>
+        <p>Fallback answer for unexpected questions</p>
+
+        <div class="form-group">
+          <label for="genericAnswer1">Generic Answer</label>
+          <input type="text" id="genericAnswer1" placeholder="To be provided">
+          <div class="help-text">Used for fields that don't match any specific category</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Automatic Registration Options</h2>
+        <p>Control how the extension handles different scenarios</p>
+
+        <div class="checkbox-group">
+          <input type="checkbox" id="autoAcceptTerms">
+          <label for="autoAcceptTerms" style="margin: 0;">Automatically accept Terms & Conditions</label>
+        </div>
+
+        <div class="checkbox-group">
+          <input type="checkbox" id="skipManualFields">
+          <label for="skipManualFields" style="margin: 0;">Skip events that require manual input</label>
+        </div>
+        <div class="help-text">If unchecked, events needing manual info will be marked "Needs Manual Registration"</div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-secondary" id="resetBtn">Reset to Defaults</button>
+      <button class="btn btn-primary" id="saveBtn">💾 Save Settings</button>
+    </div>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

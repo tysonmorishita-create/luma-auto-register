@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Luma Auto Register - Dashboard</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .dashboard {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      opacity: 0.9;
+      font-size: 16px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      padding: 30px;
+      background: #f8f9fa;
+    }
+
+    .stat-card {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 48px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .stat-value.success { color: #10b981; }
+    .stat-value.failed { color: #ef4444; }
+    .stat-value.manual { color: #f59e0b; }
+    .stat-value.pending { color: #f59e0b; }
+    .stat-value.total { color: #667eea; }
+
+    .stat-label {
+      color: #6b7280;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .progress-section {
+      padding: 30px;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 40px;
+      background: #e5e7eb;
+      border-radius: 20px;
+      overflow: hidden;
+      margin: 20px 0;
+      position: relative;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #10b981 0%, #059669 100%);
+      transition: width 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .status {
+      text-align: center;
+      font-size: 18px;
+      color: #374151;
+      margin: 20px 0;
+    }
+
+    .status.processing {
+      color: #667eea;
+      font-weight: bold;
+    }
+
+    .status.complete {
+      color: #10b981;
+      font-weight: bold;
+    }
+
+    .results-section {
+      padding: 30px;
+      border-top: 1px solid #e5e7eb;
+    }
+
+    .results-section h2 {
+      margin-bottom: 20px;
+      color: #374151;
+    }
+
+    .results-list {
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+
+    .result-item {
+      padding: 15px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .result-item:last-child {
+      border-bottom: none;
+    }
+
+    .result-item.success {
+      background: #f0fdf4;
+    }
+
+    .result-item.manual {
+      background: #fffbeb;
+    }
+
+    .result-item.failed {
+      background: #fef2f2;
+    }
+
+    .result-item.pending {
+      background: #f3f4f6;
+    }
+
+    .result-title {
+      flex: 1;
+      font-weight: 500;
+      color: #374151;
+    }
+
+    .result-status {
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .result-status.success {
+      background: #10b981;
+      color: white;
+    }
+
+    .result-status.manual {
+      background: #f59e0b;
+      color: white;
+    }
+
+    .result-status.failed {
+      background: #ef4444;
+      color: white;
+    }
+
+    .result-status.pending {
+      background: #9ca3af;
+      color: white;
+    }
+
+    .result-message {
+      font-size: 12px;
+      color: #6b7280;
+      margin-left: 10px;
+    }
+
+    .result-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .tab-link-btn {
+      padding: 6px 12px;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    .tab-link-btn:hover {
+      background: #2563eb;
+    }
+
+    .tab-link-btn:active {
+      background: #1d4ed8;
+    }
+
+    .actions {
+      padding: 20px 30px;
+      background: #f8f9fa;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+    }
+
+    .btn {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #667eea;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #5568d3;
+    }
+
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+
+    .btn-secondary {
+      background: #6b7280;
+      color: white;
+    }
+
+    .btn-secondary:hover {
+      background: #4b5563;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #9ca3af;
+    }
+
+    .empty-state h3 {
+      font-size: 24px;
+      margin-bottom: 10px;
+    }
+
+    .empty-state p {
+      font-size: 16px;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .processing-indicator {
+      animation: pulse 2s infinite;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <div class="header">
+      <h1>🎫 Luma Auto Register Dashboard</h1>
+      <p id="dashboardStatus">Monitoring registration progress...</p>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-value total" id="totalCount">0</div>
+        <div class="stat-label">Total Events</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value success" id="successCount">0</div>
+        <div class="stat-label">✓ Successful</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value manual" id="manualCount">0</div>
+        <div class="stat-label">⚠️ Manual Info</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value failed" id="failedCount">0</div>
+        <div class="stat-label">✗ Failed</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value pending" id="pendingCount">0</div>
+        <div class="stat-label">⏳ Pending</div>
+      </div>
+    </div>
+
+    <div class="progress-section">
+      <div class="status" id="statusText">Ready to start...</div>
+      <div class="progress-bar-container">
+        <div class="progress-bar" id="progressBar" style="width: 0%;">0%</div>
+      </div>
+    </div>
+
+    <div class="results-section">
+      <h2>Registration Results</h2>
+      <div class="results-list" id="resultsList">
+        <div class="empty-state">
+          <h3>No Results Yet</h3>
+          <p>Start a registration from the extension popup to see results here</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-secondary" id="refreshBtn">🔄 Refresh</button>
+      <button class="btn btn-primary" id="exportBtn">📥 Export CSV</button>
+      <button class="btn btn-danger" id="stopBtn" style="display: none;">⏹️ Stop Registration</button>
+    </div>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
