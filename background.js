@@ -231,7 +231,7 @@ class RegistrationManager {
                 }
               }
 
-              // Scroll window gradually (scroll down by viewport height)
+              // Scroll window quickly (scroll down by 1.5x viewport height for faster scanning)
               var windowHeight = window.innerHeight || document.documentElement.clientHeight;
               var currentWindowScroll = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
               var maxWindowScroll = Math.max(
@@ -240,13 +240,13 @@ class RegistrationManager {
               ) - windowHeight;
 
               if (maxWindowScroll > 0) {
-                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * 0.8, maxWindowScroll);
-                window.scrollTo({ top: nextWindowScroll, behavior: 'smooth' });
+                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * 1.5, maxWindowScroll);
+                window.scrollTo({ top: nextWindowScroll, behavior: 'smooth' }); // Smooth but fast scrolling
                 document.documentElement.scrollTop = nextWindowScroll;
                 document.body.scrollTop = nextWindowScroll;
               }
 
-              // Scroll containers gradually
+              // Scroll containers quickly
               for (var c = 0; c < containers.length; c++) {
                 var container = containers[c];
                 var containerHeight = container.clientHeight;
@@ -254,7 +254,7 @@ class RegistrationManager {
                 var maxScroll = container.scrollHeight - containerHeight;
 
                 if (maxScroll > 0) {
-                  var nextScroll = Math.min(currentScroll + containerHeight * 0.8, maxScroll);
+                  var nextScroll = Math.min(currentScroll + containerHeight * 1.5, maxScroll);
                   container.scrollTop = nextScroll;
                 }
               }
@@ -266,10 +266,10 @@ class RegistrationManager {
                 containers[c].dispatchEvent(new Event('scroll', { bubbles: true }));
               }
 
-              // Wait a bit for content to load (this runs in page context)
+              // Brief wait for content to load (reduced for speed)
               var startTime = Date.now();
-              while (Date.now() - startTime < 300) {
-                // Busy wait for 300ms
+              while (Date.now() - startTime < 100) {
+                // Busy wait for 100ms
               }
 
               // Check new content height
@@ -322,7 +322,7 @@ class RegistrationManager {
           this.sendLog('warn', `  Scroll ${i + 1}/20 failed: ${error.message}`);
         }
 
-        await this.sleep(1000); // Wait 1 second between scrolls for lazy loading
+        await this.sleep(400); // Wait 400ms between scrolls for lazy loading (faster scanning)
       }
 
       // Scroll back to top
@@ -891,7 +891,7 @@ class RegistrationManager {
                 }
               }
 
-              // Scroll window gradually (scroll down by viewport height)
+              // Scroll window quickly (scroll down by 1.5x viewport height for faster scanning)
               var windowHeight = window.innerHeight || document.documentElement.clientHeight;
               var currentWindowScroll = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
               var maxWindowScroll = Math.max(
@@ -900,13 +900,13 @@ class RegistrationManager {
               ) - windowHeight;
 
               if (maxWindowScroll > 0) {
-                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * 0.8, maxWindowScroll);
-                window.scrollTo({ top: nextWindowScroll, behavior: 'smooth' });
+                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * 1.5, maxWindowScroll);
+                window.scrollTo({ top: nextWindowScroll, behavior: 'smooth' }); // Smooth but fast scrolling
                 document.documentElement.scrollTop = nextWindowScroll;
                 document.body.scrollTop = nextWindowScroll;
               }
 
-              // Scroll containers gradually
+              // Scroll containers quickly
               for (var c = 0; c < containers.length; c++) {
                 var container = containers[c];
                 var containerHeight = container.clientHeight;
@@ -914,7 +914,7 @@ class RegistrationManager {
                 var maxScroll = container.scrollHeight - containerHeight;
 
                 if (maxScroll > 0) {
-                  var nextScroll = Math.min(currentScroll + containerHeight * 0.8, maxScroll);
+                  var nextScroll = Math.min(currentScroll + containerHeight * 1.5, maxScroll);
                   container.scrollTop = nextScroll;
                 }
               }
@@ -926,10 +926,10 @@ class RegistrationManager {
                 containers[c].dispatchEvent(new Event('scroll', { bubbles: true }));
               }
 
-              // Wait a bit for content to load (this runs in page context)
+              // Brief wait for content to load (reduced for speed)
               var startTime = Date.now();
-              while (Date.now() - startTime < 300) {
-                // Busy wait for 300ms
+              while (Date.now() - startTime < 100) {
+                // Busy wait for 100ms
               }
 
               // Check new content height
@@ -982,7 +982,7 @@ class RegistrationManager {
           this.sendLog('warn', `  Scroll ${i + 1}/20 failed: ${error.message}`);
         }
 
-        await this.sleep(1000); // Wait 1 second between scrolls for lazy loading
+        await this.sleep(400); // Wait 400ms between scrolls for lazy loading (faster scanning)
       }
 
       // Scroll back to top
