@@ -403,6 +403,12 @@ class RegistrationManager {
                   !href.includes('BP-SideEvents') &&
                   !href.includes('/settings') &&
                   !href.includes('/about') &&
+                  !href.includes('/discover') &&
+                  !href.includes('/signin') &&
+                  !href.includes('/create') &&
+                  !href.includes('/login') &&
+                  !href.match(/luma\.com\/[a-zA-Z0-9_-]+\?k=/) &&
+                  !href.match(/luma\.com\/[a-zA-Z0-9_-]+\/map/) &&
                   href !== 'https://lu.ma/' &&
                   href !== 'https://luma.com/') {
                   isEventLink = true;
@@ -414,7 +420,11 @@ class RegistrationManager {
                   !hrefAttr.includes('/calendar') &&
                   !hrefAttr.includes('/profile') &&
                   !hrefAttr.includes('/settings') &&
-                  !hrefAttr.includes('/about')) {
+                  !hrefAttr.includes('/about') &&
+                  !hrefAttr.includes('/discover') &&
+                  !hrefAttr.includes('/signin') &&
+                  !hrefAttr.includes('/create') &&
+                  !hrefAttr.includes('/login')) {
                   isEventLink = true;
                 }
               }
@@ -529,6 +539,12 @@ class RegistrationManager {
                   !href.includes('BP-SideEvents') &&
                   !href.includes('/settings') &&
                   !href.includes('/about') &&
+                  !href.includes('/discover') &&
+                  !href.includes('/signin') &&
+                  !href.includes('/create') &&
+                  !href.includes('/login') &&
+                  !href.match(/luma\.com\/[a-zA-Z0-9_-]+\?k=/) &&
+                  !href.match(/luma\.com\/[a-zA-Z0-9_-]+\/map/) &&
                   href !== 'https://lu.ma/' &&
                   href !== 'https://luma.com/') {
                   isEventLink = true;
@@ -541,7 +557,11 @@ class RegistrationManager {
                   !hrefAttr.includes('/calendar') &&
                   !hrefAttr.includes('/profile') &&
                   !hrefAttr.includes('/settings') &&
-                  !hrefAttr.includes('/about')) {
+                  !hrefAttr.includes('/about') &&
+                  !hrefAttr.includes('/discover') &&
+                  !hrefAttr.includes('/signin') &&
+                  !hrefAttr.includes('/create') &&
+                  !hrefAttr.includes('/login')) {
                   isEventLink = true;
                   // Resolve relative URL to absolute for consistency
                   href = window.location.origin + hrefAttr;
@@ -576,11 +596,17 @@ class RegistrationManager {
               console.log('[Luma Auto Register] Processing: ' + href);
             }
 
-            // Skip calendar pages
+            // Skip calendar pages and non-event URLs
             if (href.indexOf('/calendar') > -1 ||
               href.indexOf('/profile') > -1 ||
-              href.indexOf('BP-SideEvents') > -1) {
-              debugInfo.filteredOut.push({ href: href });
+              href.indexOf('BP-SideEvents') > -1 ||
+              href.indexOf('/discover') > -1 ||
+              href.indexOf('/signin') > -1 ||
+              href.indexOf('/create') > -1 ||
+              href.indexOf('/login') > -1 ||
+              href.match(/luma\.com\/[a-zA-Z0-9_-]+\?k=/) ||
+              href.match(/luma\.com\/[a-zA-Z0-9_-]+\/map/)) {
+              debugInfo.filteredOut.push({ href: href, reason: 'Non-event URL pattern' });
               continue;
             }
 
@@ -1474,10 +1500,10 @@ class RegistrationManager {
 
       this.sendLog('info', `  Injecting registration script...`);
 
-      // Create a timeout promise (15 seconds)
+      // Create a timeout promise (8 seconds)
       // This covers the full registration flow when there are no required questions
       // (or nothing is actively being filled), which should be quick.
-      const REGISTRATION_TIMEOUT = 15000; // 15 seconds
+      const REGISTRATION_TIMEOUT = 8000; // 8 seconds
       const CLOUDFLARE_EXTENDED_TIMEOUT = 90000; // 90 seconds if Cloudflare detected (increased for verification)
 
       const timeoutPromise = new Promise((resolve) => {
@@ -2927,6 +2953,10 @@ class RegistrationManager {
                   }
 
                   console.log('[Luma Auto Register] Required field detected (has asterisk): ' + (label || name || placeholder));
+                  
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:2955-field',message:'Processing required field',data:{label:label,name:name,placeholder:placeholder,type:type,hasCompany:label.indexOf('company')>-1,hasFund:label.indexOf('fund')>-1,hasName:label.indexOf('name')>-1},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H5'})}).catch(()=>{});
+                  // #endregion
 
                   // SPECIAL: Detect ALL required checkboxes (check this BEFORE other logic)
                   if (type === 'checkbox') {
@@ -3227,11 +3257,17 @@ class RegistrationManager {
                       valueToFill = settings.lastName;
                     }
                   }
-                  // Generic Name field (just "name" without "first" or "last")
+                  // Generic Name field (just "name" without "first" or "last" or "company" or "fund")
                   else if ((label.indexOf('name') > -1 || placeholder.indexOf('name') > -1 || name.indexOf('name') > -1) &&
                     label.indexOf('first') === -1 && label.indexOf('last') === -1 &&
                     label.indexOf('full') === -1 && placeholder.indexOf('full') === -1 &&
-                    name.indexOf('first') === -1 && name.indexOf('last') === -1) {
+                    name.indexOf('first') === -1 && name.indexOf('last') === -1 &&
+                    label.indexOf('company') === -1 && label.indexOf('fund') === -1 &&
+                    label.indexOf('organization') === -1 && label.indexOf('organisation') === -1 &&
+                    label.indexOf('business') === -1 && label.indexOf('employer') === -1) {
+                    // #region agent log
+                    fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:3257-generic-name',message:'MATCHED generic name field',data:{label:label,placeholder:placeholder,name:name},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
+                    // #endregion
                     // Use full name if both first and last are available, otherwise use what's available
                     if (settings.firstName && settings.lastName) {
                       valueToFill = settings.firstName + ' ' + settings.lastName;
@@ -3266,9 +3302,12 @@ class RegistrationManager {
                     (placeholder.indexOf('company') > -1 && (placeholder.indexOf('website') > -1 || placeholder.indexOf('url') > -1))) {
                     // Company website field - use companyWebsite setting, fallback to website
                     valueToFill = settings.companyWebsite || settings.website || '';
-                  } else if (containsAny(name, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm']) ||
-                    containsAny(label, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm']) ||
-                    containsAny(placeholder, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm'])) {
+                  } else if (containsAny(name, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund']) ||
+                    containsAny(label, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund']) ||
+                    containsAny(placeholder, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund'])) {
+                    // #region agent log
+                    fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:3298-company',message:'MATCHED company/fund field',data:{label:label,placeholder:placeholder,name:name,settingsCompany:settings.company},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2'})}).catch(()=>{});
+                    // #endregion
                     valueToFill = settings.company || 'Independent';
                   } else if ((name.indexOf('title') > -1 || label.indexOf('job title') > -1 ||
                     label.indexOf('role') > -1 || placeholder.indexOf('title') > -1 ||
@@ -3435,6 +3474,9 @@ class RegistrationManager {
                   }
 
                   if (valueToFill && valueToFill !== '') {
+                    // #region agent log
+                    fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:3472-fill',message:'Filling field with valueToFill',data:{fieldDescription:fieldDescription,valueToFill:valueToFill,label:label},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H3'})}).catch(()=>{});
+                    // #endregion
                     fieldsToFill.push({
                       input: input,
                       value: valueToFill,
@@ -4044,6 +4086,10 @@ class RegistrationManager {
                       console.log('  Text:', (elem.textContent || '').trim().substring(0, 150));
                       console.log('  Target Element:', targetElement.tagName, targetElement.className);
 
+                      // #region agent log
+                      fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4087-selectOneOrMore',message:'Found Select one or more element',data:{elemTag:elem.tagName,elemClass:(elem.className||'').substring(0,100),elemTextStart:(elem.textContent||'').trim().substring(0,200),targetTag:targetElement.tagName,targetId:targetElement.id||'none',targetName:targetElement.name||'none',targetPlaceholder:targetElement.placeholder||'none',innerInputFound:!!innerInput},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H10'})}).catch(()=>{});
+                      // #endregion
+
                       // Extract label text - look for the actual label element, not parent container text
                       var labelText = '';
 
@@ -4072,13 +4118,29 @@ class RegistrationManager {
                           var siblingCount = 0;
                           while (sibling && siblingCount < 5) {
                             var siblingText = (sibling.textContent || '').trim();
-                            // Look for text that looks like a question (contains "what", "which", "how", etc. and has asterisk)
-                            if (siblingText.length > 10 && siblingText.length < 200 &&
+                            var siblingTextLower = siblingText.toLowerCase();
+                            // Check if this is a known dropdown field name
+                            var isKnownSiblingField = 
+                              siblingTextLower.indexOf('job') > -1 ||
+                              siblingTextLower.indexOf('title') > -1 ||
+                              siblingTextLower.indexOf('role') > -1 ||
+                              siblingTextLower.indexOf('position') > -1 ||
+                              siblingTextLower.indexOf('industry') > -1 ||
+                              siblingTextLower.indexOf('country') > -1 ||
+                              siblingTextLower.indexOf('experience') > -1 ||
+                              siblingTextLower.indexOf('company') > -1 ||
+                              siblingTextLower.indexOf('describe') > -1 ||
+                              siblingTextLower.indexOf('ecosystem') > -1;
+                            var hasSiblingQuestion = 
+                              siblingTextLower.indexOf('what') > -1 ||
+                              siblingTextLower.indexOf('which') > -1 ||
+                              siblingTextLower.indexOf('how') > -1 ||
+                              siblingTextLower.indexOf('who') > -1;
+                            // Look for text that has asterisk and is either a question or known field name
+                            if (siblingText.length > 5 && siblingText.length < 200 &&
                               (siblingText.indexOf('*') > -1 || siblingText.indexOf('required') > -1) &&
-                              (siblingText.toLowerCase().indexOf('what') > -1 ||
-                                siblingText.toLowerCase().indexOf('which') > -1 ||
-                                siblingText.toLowerCase().indexOf('how') > -1 ||
-                                siblingText.toLowerCase().indexOf('who') > -1)) {
+                              (hasSiblingQuestion || isKnownSiblingField) &&
+                              siblingTextLower !== 'name *' && siblingTextLower !== 'email *') {
                               labelText = siblingText;
                               break;
                             }
@@ -4098,14 +4160,27 @@ class RegistrationManager {
                             if (fieldLabel) {
                               var fieldLabelText = (fieldLabel.textContent || '').trim().toLowerCase();
                               var fieldLabelHTML = (fieldLabel.innerHTML || '').toLowerCase();
-                              // Check if it's a valid question label
-                              if (fieldLabelText.length > 10 && fieldLabelText.length < 200 &&
+                              // Check if it's a valid label (question OR known dropdown field name)
+                              var isKnownDropdownField = 
+                                fieldLabelText.indexOf('job') > -1 ||
+                                fieldLabelText.indexOf('title') > -1 ||
+                                fieldLabelText.indexOf('role') > -1 ||
+                                fieldLabelText.indexOf('position') > -1 ||
+                                fieldLabelText.indexOf('industry') > -1 ||
+                                fieldLabelText.indexOf('country') > -1 ||
+                                fieldLabelText.indexOf('experience') > -1 ||
+                                fieldLabelText.indexOf('company') > -1 ||
+                                fieldLabelText.indexOf('describe') > -1 ||
+                                fieldLabelText.indexOf('ecosystem') > -1;
+                              var hasQuestionWord = 
+                                fieldLabelText.indexOf('what') > -1 ||
+                                fieldLabelText.indexOf('which') > -1 ||
+                                fieldLabelText.indexOf('how') > -1 ||
+                                fieldLabelText.indexOf('who') > -1 ||
+                                fieldLabelText.indexOf('where') > -1;
+                              if (fieldLabelText.length > 5 && fieldLabelText.length < 200 &&
                                 (fieldLabelText.indexOf('*') > -1 || fieldLabelHTML.indexOf('*') > -1 || fieldLabelHTML.indexOf('&#42;') > -1) &&
-                                (fieldLabelText.indexOf('what') > -1 ||
-                                  fieldLabelText.indexOf('which') > -1 ||
-                                  fieldLabelText.indexOf('how') > -1 ||
-                                  fieldLabelText.indexOf('who') > -1 ||
-                                  fieldLabelText.indexOf('where') > -1) &&
+                                (hasQuestionWord || isKnownDropdownField) &&
                                 // Skip generic field names
                                 fieldLabelText !== 'name *' &&
                                 fieldLabelText !== 'email *' &&
@@ -4143,16 +4218,30 @@ class RegistrationManager {
                                 var isAboveInput = candidateRect.bottom <= inputRect.top + 50; // Allow 50px overlap
                                 var verticalDistance = Math.abs(candidateRect.bottom - inputRect.top);
 
-                                // Must be a question-like label with asterisk, above the input, and reasonably close
+                                // Check if this is a known dropdown field name or has question words
+                                var isKnownField3 = 
+                                  candidateText.indexOf('job') > -1 ||
+                                  candidateText.indexOf('title') > -1 ||
+                                  candidateText.indexOf('role') > -1 ||
+                                  candidateText.indexOf('position') > -1 ||
+                                  candidateText.indexOf('industry') > -1 ||
+                                  candidateText.indexOf('country') > -1 ||
+                                  candidateText.indexOf('experience') > -1 ||
+                                  candidateText.indexOf('company') > -1 ||
+                                  candidateText.indexOf('describe') > -1 ||
+                                  candidateText.indexOf('ecosystem') > -1;
+                                var hasQuestion3 = 
+                                  candidateText.indexOf('what') > -1 ||
+                                  candidateText.indexOf('which') > -1 ||
+                                  candidateText.indexOf('how') > -1 ||
+                                  candidateText.indexOf('who') > -1 ||
+                                  candidateText.indexOf('where') > -1;
+                                // Must be a valid label with asterisk, above the input, and reasonably close
                                 if (isAboveInput &&
                                   verticalDistance < 150 && // Within 150px vertically
-                                  candidateText.length > 10 && candidateText.length < 200 &&
+                                  candidateText.length > 5 && candidateText.length < 200 &&
                                   (candidateText.indexOf('*') > -1 || candidateHTML.indexOf('*') > -1 || candidateHTML.indexOf('&#42;') > -1) &&
-                                  (candidateText.indexOf('what') > -1 ||
-                                    candidateText.indexOf('which') > -1 ||
-                                    candidateText.indexOf('how') > -1 ||
-                                    candidateText.indexOf('who') > -1 ||
-                                    candidateText.indexOf('where') > -1)) {
+                                  (hasQuestion3 || isKnownField3)) {
                                   // Prefer the closest label above the input
                                   if (verticalDistance < bestDistance) {
                                     bestDistance = verticalDistance;
@@ -4186,14 +4275,27 @@ class RegistrationManager {
                               continue;
                             }
 
-                            // Check if it's a question-like label with asterisk
-                            if (parentLabelText.length > 10 && parentLabelText.length < 200 &&
+                            // Check if it's a valid label (question word OR known dropdown field name)
+                            var isKnownDropdownField2 = 
+                              parentLabelText.indexOf('job') > -1 ||
+                              parentLabelText.indexOf('title') > -1 ||
+                              parentLabelText.indexOf('role') > -1 ||
+                              parentLabelText.indexOf('position') > -1 ||
+                              parentLabelText.indexOf('industry') > -1 ||
+                              parentLabelText.indexOf('country') > -1 ||
+                              parentLabelText.indexOf('experience') > -1 ||
+                              parentLabelText.indexOf('company') > -1 ||
+                              parentLabelText.indexOf('describe') > -1 ||
+                              parentLabelText.indexOf('ecosystem') > -1;
+                            var hasQuestionWord2 = 
+                              parentLabelText.indexOf('what') > -1 ||
+                              parentLabelText.indexOf('which') > -1 ||
+                              parentLabelText.indexOf('how') > -1 ||
+                              parentLabelText.indexOf('who') > -1 ||
+                              parentLabelText.indexOf('where') > -1;
+                            if (parentLabelText.length > 5 && parentLabelText.length < 200 &&
                               (parentLabelText.indexOf('*') > -1 || parentLabelHTML.indexOf('*') > -1 || parentLabelHTML.indexOf('&#42;') > -1) &&
-                              (parentLabelText.indexOf('what') > -1 ||
-                                parentLabelText.indexOf('which') > -1 ||
-                                parentLabelText.indexOf('how') > -1 ||
-                                parentLabelText.indexOf('who') > -1 ||
-                                parentLabelText.indexOf('where') > -1)) {
+                              (hasQuestionWord2 || isKnownDropdownField2)) {
                               // Check if this label comes before the dropdown in DOM order
                               var labelIndex = Array.from(parent.children).indexOf(parentLabel);
                               var dropdownIndex = Array.from(parent.children).indexOf(elem);
@@ -4213,6 +4315,9 @@ class RegistrationManager {
                           var match = fullText.match(/(.+?)\s*select one or more/i);
                           if (match && match[1]) {
                             labelText = match[1].trim();
+                            // #region agent log
+                            fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4315-fallbackRegex',message:'Label from regex fallback on elem text',data:{fullTextStart:fullText.substring(0,200),matchResult:match[1].substring(0,100)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H12'})}).catch(()=>{});
+                            // #endregion
                           } else {
                             // Try parent, but only if parent text is reasonable length
                             if (parent) {
@@ -4230,7 +4335,12 @@ class RegistrationManager {
                       }
 
                       // Clean up the label (remove "Select one or more" and "This field is required")
+                      var labelTextBeforeCleanup = labelText;
                       labelText = labelText.replace(/select one or more.*$/i, '').replace(/this field is required.*$/i, '').trim();
+
+                      // #region agent log
+                      fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4331-labelExtraction',message:'Label after extraction',data:{labelTextBeforeCleanup:labelTextBeforeCleanup.substring(0,200),labelTextAfterCleanup:labelText.substring(0,200),labelLength:labelText.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H11'})}).catch(()=>{});
+                      // #endregion
 
                       // If label is too long, try to extract just the question part
                       if (labelText.length > 160) {
@@ -4323,23 +4433,34 @@ class RegistrationManager {
                         }
                       }
 
-                      // Also verify the label is valid (not just "name *" or other field names)
+                      // Also verify the label is valid (not just "name *" or other basic field names)
                       // labelTextLower already declared above, just use it
+                      // Note: job title dropdowns SHOULD be processed - user's title setting can be matched to options
                       var isInvalidLabel = labelTextLower === 'name *' ||
                         labelTextLower === 'email *' ||
                         labelTextLower === 'phone *' ||
-                        labelTextLower === 'company name *' ||
-                        labelTextLower === 'job title *' ||
                         labelTextLower === 'linkedin profile *' ||
                         (labelTextLower.indexOf('name *') > -1 && labelTextLower.indexOf('email *') > -1) ||
-                        // Also skip if label doesn't contain question words (likely a simple field name)
+                        // Also skip if label doesn't contain question words AND isn't a known dropdown field
                         (labelTextLower.length < 20 &&
                           labelTextLower.indexOf('what') === -1 &&
                           labelTextLower.indexOf('which') === -1 &&
                           labelTextLower.indexOf('how') === -1 &&
                           labelTextLower.indexOf('who') === -1 &&
                           labelTextLower.indexOf('where') === -1 &&
-                          labelTextLower.indexOf('when') === -1);
+                          labelTextLower.indexOf('when') === -1 &&
+                          labelTextLower.indexOf('job') === -1 &&
+                          labelTextLower.indexOf('title') === -1 &&
+                          labelTextLower.indexOf('role') === -1 &&
+                          labelTextLower.indexOf('position') === -1 &&
+                          labelTextLower.indexOf('company') === -1 &&
+                          labelTextLower.indexOf('industry') === -1 &&
+                          labelTextLower.indexOf('country') === -1 &&
+                          labelTextLower.indexOf('experience') === -1);
+
+                      // #region agent log
+                      fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4370-dropdown',message:'Checking dropdown label validity',data:{labelTextLower:labelTextLower,isInvalidLabel:isInvalidLabel,labelLength:labelTextLower.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H4'})}).catch(()=>{});
+                      // #endregion
 
                       if (isInvalidLabel) {
                         console.log('[Luma Auto Register] Skipping dropdown with invalid label: "' + labelTextLower + '"');
@@ -8772,8 +8893,66 @@ class RegistrationManager {
                       }
                     } else {
                       console.log('[Luma Auto Register] No terms modal found');
+                      
+                      // FALLBACK: Click the regular terms checkbox if it exists and hasn't been clicked
+                      // This handles cases where dropdown processing didn't complete properly
+                      if (termsCheckbox && !termsCheckbox.checked) {
+                        console.log('[Luma Auto Register] === FALLBACK: Checking terms checkbox (no modal) ===');
+                        
+                        // Check if it's required or autoAcceptTerms is enabled
+                        var isRequired = false;
+                        var termsLabelEl = termsCheckbox.closest('label') ||
+                          document.querySelector('label[for="' + (termsCheckbox.id || '') + '"]') ||
+                          termsCheckbox.previousElementSibling;
+                        if (termsLabelEl) {
+                          var termsLabel = (termsLabelEl.textContent || termsLabelEl.innerText || '').toLowerCase();
+                          if (termsLabel.indexOf('*') > -1 || (termsLabelEl.innerHTML || '').indexOf('*') > -1) {
+                            isRequired = true;
+                          }
+                        }
+                        
+                        if (isRequired || settings.autoAcceptTerms) {
+                          console.log('[Luma Auto Register] Clicking terms checkbox via fallback mechanism');
+                          reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (fallback)');
+                          
+                          // Verify it stays checked
+                          setTimeout(function () {
+                            if (termsCheckbox && !termsCheckbox.checked) {
+                              console.log('[Luma Auto Register] ⚠️ Terms checkbox unchecked, re-clicking...');
+                              reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (fallback retry)');
+                            } else {
+                              console.log('[Luma Auto Register] ✓ Terms checkbox confirmed checked (fallback)');
+                            }
+                          }, 500);
+                        }
+                      } else if (termsCheckbox && termsCheckbox.checked) {
+                        console.log('[Luma Auto Register] ✓ Terms checkbox already checked');
+                      }
                     }
                   }, 1000); // Wait 1 second for modal to appear
+                  
+                  // ADDITIONAL FALLBACK: Check again after 3 seconds in case earlier attempts failed
+                  setTimeout(function () {
+                    if (termsCheckbox && !termsCheckbox.checked) {
+                      console.log('[Luma Auto Register] === LATE FALLBACK: Terms checkbox still unchecked after 3s ===');
+                      
+                      var isRequired = false;
+                      var termsLabelEl = termsCheckbox.closest('label') ||
+                        document.querySelector('label[for="' + (termsCheckbox.id || '') + '"]') ||
+                        termsCheckbox.previousElementSibling;
+                      if (termsLabelEl) {
+                        var termsLabel = (termsLabelEl.textContent || termsLabelEl.innerText || '').toLowerCase();
+                        if (termsLabel.indexOf('*') > -1 || (termsLabelEl.innerHTML || '').indexOf('*') > -1) {
+                          isRequired = true;
+                        }
+                      }
+                      
+                      if (isRequired || settings.autoAcceptTerms) {
+                        console.log('[Luma Auto Register] Clicking terms checkbox via late fallback');
+                        reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (late fallback)');
+                      }
+                    }
+                  }, 3000); // Wait 3 seconds total
                 }
 
                 // Handle all other required checkboxes (auto-check them)
