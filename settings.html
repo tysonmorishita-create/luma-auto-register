@@ -587,6 +587,13 @@
         <div class="form-group">
           <label for="city">City</label>
           <input type="text" id="city" placeholder="New York">
+          <div class="example-text">Used for "City" or "Where are you located?" dropdowns</div>
+        </div>
+
+        <div class="form-group">
+          <label for="state">State / Province</label>
+          <input type="text" id="state" placeholder="California">
+          <div class="example-text">Used for "State", "Province", or "Region" dropdowns</div>
         </div>
 
         <div class="form-group">
@@ -785,6 +792,15 @@
           <label for="skipManualFields" style="margin: 0;">Skip events that require manual input</label>
         </div>
         <div class="help-text">If unchecked, events needing manual info will be marked "Needs Manual Registration"</div>
+
+        <div class="checkbox-group" style="margin-top: 15px;">
+          <input type="checkbox" id="autoSelectFirstOption">
+          <label for="autoSelectFirstOption" style="margin: 0;">⚡ Speed Mode: Auto-select first dropdown option when no match found</label>
+        </div>
+        <div class="help-text">
+          <strong>✅ Checked (Speed Mode):</strong> Dropdowns without a matching setting will auto-select the first option. Best for bulk registrations.<br>
+          <strong>⬜ Unchecked (Safe Mode):</strong> Dropdowns without a match will be SKIPPED. Best for sensitive events where you want to manually review.
+        </div>
       </div>
     </div>
 

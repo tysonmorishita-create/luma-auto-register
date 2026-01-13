@@ -1557,7 +1557,11 @@ class RegistrationManager {
           return new Promise(function (resolve) {
             try {
               console.log('[Luma Auto Register] === REGISTRATION STARTED ===');
-
+              console.log('[Luma Auto Register] Settings received:');
+              console.log('[Luma Auto Register]   autoSelectFirstOption = ' + settings.autoSelectFirstOption + ' (type: ' + typeof settings.autoSelectFirstOption + ')');
+              console.log('[Luma Auto Register]   → ' + (settings.autoSelectFirstOption === false ? '🛡️ SAFE MODE: Will NOT auto-select first dropdown option' : '⚡ SPEED MODE: Will auto-select first dropdown option if no match'));
+              console.log('[Luma Auto Register]   autoAcceptTerms = ' + settings.autoAcceptTerms);
+              
               // Reset network success flag for this registration attempt
               if (typeof window !== 'undefined') {
                 window.__lumaAutoRegisterNetworkSuccessFlag = false;
@@ -1867,7 +1871,7 @@ class RegistrationManager {
                       elementTextLower.indexOf("youre in") > -1 || // Without apostrophe
                       elementTextLower.indexOf("you are in") > -1 || // Alternative phrasing
                       bodyTextLower.indexOf("pending approval") > -1 ||
-                      bodyTextLower.indexOf("approval required") > -1 ||
+                      bodyTextLower.indexOf("your request has been submitted") > -1 ||
                       bodyTextLower.indexOf("subject to host approval") > -1 ||
                       bodyTextLower.indexOf("registration confirmed") > -1 ||
                       bodyTextLower.indexOf("registration successful") > -1 ||
@@ -2015,6 +2019,65 @@ class RegistrationManager {
 
                 // If no modal found, check document for form inputs (including those that might be in portals or shadow DOM)
                 if (!formContainer) {
+                  // First, try Luma-specific selectors for their React form components
+                  var lumaFormSelectors = [
+                    '[class*="registration"]',
+                    '[class*="Registration"]',
+                    '[class*="checkout"]',
+                    '[class*="Checkout"]',
+                    '[class*="event-form"]',
+                    '[class*="EventForm"]',
+                    '[class*="lux-input"]',
+                    '[class*="form-field"]',
+                    '[class*="FormField"]',
+                    '[data-testid*="form"]',
+                    '[data-testid*="registration"]'
+                  ];
+                  
+                  for (var lfs = 0; lfs < lumaFormSelectors.length; lfs++) {
+                    var lumaForms = document.querySelectorAll(lumaFormSelectors[lfs]);
+                    if (lumaForms.length > 0) {
+                      console.log('[Luma Auto Register] Found ' + lumaForms.length + ' Luma form elements matching: ' + lumaFormSelectors[lfs]);
+                      // Check if any have inputs
+                      for (var lf = 0; lf < lumaForms.length; lf++) {
+                        var lumaForm = lumaForms[lf];
+                        var lumaInputs = lumaForm.querySelectorAll('input, textarea, select, [contenteditable="true"]');
+                        if (lumaInputs.length > 0) {
+                          formContainer = lumaForm;
+                          console.log('[Luma Auto Register] ✓ Found Luma form with ' + lumaInputs.length + ' inputs');
+                          break;
+                        }
+                      }
+                      if (formContainer) break;
+                    }
+                  }
+                  
+                  // Also check for inputs with Luma-specific attributes/placeholders
+                  if (!formContainer) {
+                    var lumaInputSelectors = [
+                      'input[placeholder*="Name"]',
+                      'input[placeholder*="name"]',
+                      'input[placeholder*="Email"]',
+                      'input[placeholder*="email"]',
+                      'input[name="name"]',
+                      'input[name="email"]',
+                      '[class*="lux-input"]',
+                      '[class*="input-wrapper"]'
+                    ];
+                    
+                    for (var lis = 0; lis < lumaInputSelectors.length; lis++) {
+                      var lumaInputElements = document.querySelectorAll(lumaInputSelectors[lis]);
+                      if (lumaInputElements.length > 0) {
+                        console.log('[Luma Auto Register] Found ' + lumaInputElements.length + ' inputs matching: ' + lumaInputSelectors[lis]);
+                        formContainer = lumaInputElements[0].closest('form') || lumaInputElements[0].closest('[class*="modal"]') || document.body;
+                        console.log('[Luma Auto Register] ✓ Found form container via Luma input selector');
+                        break;
+                      }
+                    }
+                  }
+                }
+                
+                if (!formContainer) {
                   var allInputs = document.querySelectorAll('input, textarea, select');
                   console.log('[Luma Auto Register] Checking ' + allInputs.length + ' total inputs in document');
                   if (allInputs.length > 0) {
@@ -2120,9 +2183,62 @@ class RegistrationManager {
                 // If still no form after max attempts, proceed anyway (might be a different flow)
                 if (!formContainer) {
                   console.log('[Luma Auto Register] ⚠️ Form not found after ' + maxAttempts + ' attempts, proceeding anyway...');
+
                   console.log('[Luma Auto Register] Debug: Found ' + document.querySelectorAll('input, textarea, select').length + ' total inputs, ' +
                     document.querySelectorAll('[role="dialog"]').length + ' dialogs, ' +
                     document.querySelectorAll('.modal, [class*="modal"]').length + ' modals');
+                  
+                  // Extended debugging - check for any elements that might be form fields
+                  var debugSelectors = {
+                    'input': document.querySelectorAll('input').length,
+                    'textarea': document.querySelectorAll('textarea').length,
+                    'select': document.querySelectorAll('select').length,
+                    '[contenteditable]': document.querySelectorAll('[contenteditable]').length,
+                    '[class*="input"]': document.querySelectorAll('[class*="input"]').length,
+                    '[class*="Input"]': document.querySelectorAll('[class*="Input"]').length,
+                    '[class*="field"]': document.querySelectorAll('[class*="field"]').length,
+                    '[class*="Field"]': document.querySelectorAll('[class*="Field"]').length,
+                    '[placeholder]': document.querySelectorAll('[placeholder]').length,
+                    'label': document.querySelectorAll('label').length,
+                    '[class*="lux"]': document.querySelectorAll('[class*="lux"]').length,
+                    '[class*="jsx"]': document.querySelectorAll('[class*="jsx"]').length,
+                    'form': document.querySelectorAll('form').length,
+                    'button': document.querySelectorAll('button').length
+                  };
+                  console.log('[Luma Auto Register] Extended debug - element counts:');
+                  for (var ds in debugSelectors) {
+                    if (debugSelectors[ds] > 0) {
+                      console.log('[Luma Auto Register]   ' + ds + ': ' + debugSelectors[ds]);
+                    }
+                  }
+                  
+                  // Check if there are any elements with "Name" or "Email" text
+                  var allElements = document.body.getElementsByTagName('*');
+                  var nameElements = [];
+                  var emailElements = [];
+                  for (var ae = 0; ae < Math.min(allElements.length, 1000); ae++) {
+                    var el = allElements[ae];
+                    var elText = (el.textContent || '').trim().substring(0, 100);
+                    if (elText.toLowerCase().indexOf('your name') > -1 || 
+                        (el.placeholder && el.placeholder.toLowerCase().indexOf('name') > -1)) {
+                      nameElements.push(el.tagName + '.' + (el.className || '').substring(0, 50));
+                    }
+                    if (elText.toLowerCase().indexOf('email') > -1 ||
+                        (el.placeholder && el.placeholder.toLowerCase().indexOf('email') > -1)) {
+                      emailElements.push(el.tagName + '.' + (el.className || '').substring(0, 50));
+                    }
+                  }
+                  if (nameElements.length > 0) {
+                    console.log('[Luma Auto Register] Elements containing "name": ' + nameElements.slice(0, 5).join(', '));
+                  }
+                  if (emailElements.length > 0) {
+                    console.log('[Luma Auto Register] Elements containing "email": ' + emailElements.slice(0, 5).join(', '));
+                  }
+                  
+                  // Check document URL and title
+                  console.log('[Luma Auto Register] Page URL: ' + window.location.href);
+                  console.log('[Luma Auto Register] Page title: ' + document.title);
+                  
                   formContainer = document.body; // Use document body as fallback
                 }
 
@@ -2785,6 +2901,114 @@ class RegistrationManager {
 
                 console.log('[Luma Auto Register] Found ' + visibleInputs.length + ' visible form fields (out of ' + allInputs.length + ' total), ' + customDropdowns.length + ' custom dropdowns');
 
+                // CRITICAL CHECK: If we found absolutely NO inputs and NO dropdowns, the form detection likely failed
+                // BUT: Some events have NO custom questions - just need to click submit directly
+                var formDetectionFailed = (visibleInputs.length === 0 && allInputs.length === 0 && customDropdowns.length === 0);
+                if (formDetectionFailed) {
+                  console.log('[Luma Auto Register] No form fields found - checking if this is a direct-submit event...');
+                  
+                  // Look for submit button to click directly (events with no custom questions)
+                  var directSubmitBtn = null;
+                  var allBtns = document.querySelectorAll('button[type="submit"], button');
+                  console.log('[Luma Auto Register] Searching ' + allBtns.length + ' buttons for direct submit...');
+                  
+                  for (var dsb = 0; dsb < allBtns.length; dsb++) {
+                    var dsbText = (allBtns[dsb].textContent || '').toLowerCase().trim();
+                    var dsbType = allBtns[dsb].type;
+                    var dsbVisible = allBtns[dsb].offsetParent !== null;
+                    var dsbDisabled = allBtns[dsb].disabled;
+                    
+                    console.log('[Luma Auto Register]   Button ' + dsb + ': "' + dsbText.substring(0, 30) + '" type=' + dsbType + ' visible=' + dsbVisible);
+                    
+                    if (dsbVisible && !dsbDisabled) {
+                      // Look for submit-type buttons, prioritize type=submit
+                      if (dsbText.indexOf('request to join') > -1 || dsbText.indexOf('register') > -1 || dsbText.indexOf('join waitlist') > -1 || dsbText.indexOf('submit') > -1) {
+                        if (dsbType === 'submit' || !directSubmitBtn) {
+                          directSubmitBtn = allBtns[dsb];
+                          console.log('[Luma Auto Register] ✓ Found potential submit button: "' + dsbText + '"');
+                          if (dsbType === 'submit') break; // Best match found
+                        }
+                      }
+                    }
+                  }
+                  
+                  if (directSubmitBtn) {
+                    console.log('[Luma Auto Register] Found direct submit button: "' + directSubmitBtn.textContent.trim() + '"');
+                    console.log('[Luma Auto Register] This event has no custom form fields - clicking submit directly...');
+                    
+                    // Click the submit button
+                    directSubmitBtn.focus();
+                    directSubmitBtn.click();
+                    try {
+                      directSubmitBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                      directSubmitBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                      directSubmitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    } catch(e) {}
+                    
+                    console.log('[Luma Auto Register] ✓ Direct submit clicked!');
+                    
+                    // Poll for success (network flag or page indicators)
+                    var directPollAttempts = 0;
+                    var maxDirectPollAttempts = 20; // 10 seconds
+                    
+                    var pollDirectSuccess = function() {
+                      directPollAttempts++;
+                      
+                      // Check network flag
+                      if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                        console.log('[Luma Auto Register] ✓ Direct registration confirmed via network (poll ' + directPollAttempts + ')');
+                        resolve({ success: true, message: 'Registered successfully (no form fields required)' });
+                        return;
+                      }
+                      
+                      // Check page text for success indicators
+                      var pageText = (document.body.innerText || '').toLowerCase();
+                      var hasSuccess = pageText.indexOf('pending') > -1 || 
+                                      pageText.indexOf('requested') > -1 || 
+                                      pageText.indexOf('submitted') > -1 ||
+                                      pageText.indexOf("you're registered") > -1 ||
+                                      pageText.indexOf("you're going") > -1 ||
+                                      pageText.indexOf('registration confirmed') > -1 ||
+                                      pageText.indexOf('request sent') > -1 ||
+                                      pageText.indexOf("you're in") > -1;
+                      
+                      if (hasSuccess) {
+                        console.log('[Luma Auto Register] ✓ Direct registration appears successful (poll ' + directPollAttempts + ')!');
+                        resolve({ success: true, message: 'Registration submitted (no form fields required)' });
+                        return;
+                      }
+                      
+                      if (directPollAttempts < maxDirectPollAttempts) {
+                        setTimeout(pollDirectSuccess, 500);
+                        return;
+                      }
+                      
+                      // Polling exhausted - assume success since we clicked
+                      console.log('[Luma Auto Register] Direct submit polling exhausted - assuming success');
+                      resolve({ success: true, message: 'Registration attempted (no form fields detected)' });
+                    };
+                    
+                    // Start polling after short delay
+                    setTimeout(pollDirectSuccess, 1000);
+                    return;
+                  }
+                  
+                  // No direct submit button found either
+                  console.log('[Luma Auto Register] ⚠️⚠️⚠️ FORM DETECTION FAILED - No inputs, dropdowns, or submit button found!');
+                  console.log('[Luma Auto Register] This likely means:');
+                  console.log('[Luma Auto Register]   1. The form is in a cross-origin iframe');
+                  console.log('[Luma Auto Register]   2. The form uses non-standard input elements');
+                  console.log('[Luma Auto Register]   3. The form has not loaded yet');
+                  console.log('[Luma Auto Register] Marking as FAILED to avoid false positives');
+                  
+                  resolve({
+                    success: false,
+                    message: 'Form detection failed - could not find any input fields. This event may require manual registration.',
+                    requiresManual: true
+                  });
+                  return;
+                }
+
                 // Use visible inputs for processing
                 allInputs = visibleInputs;
 
@@ -2953,10 +3177,6 @@ class RegistrationManager {
                   }
 
                   console.log('[Luma Auto Register] Required field detected (has asterisk): ' + (label || name || placeholder));
-                  
-                  // #region agent log
-                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:2955-field',message:'Processing required field',data:{label:label,name:name,placeholder:placeholder,type:type,hasCompany:label.indexOf('company')>-1,hasFund:label.indexOf('fund')>-1,hasName:label.indexOf('name')>-1},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H5'})}).catch(()=>{});
-                  // #endregion
 
                   // SPECIAL: Detect ALL required checkboxes (check this BEFORE other logic)
                   if (type === 'checkbox') {
@@ -3033,13 +3253,33 @@ class RegistrationManager {
                           console.log('[Luma Auto Register] Found terms checkbox: ' + (label || name || id));
                         }
                       } else {
-                        // It's a required checkbox but not terms - add to list (always check these)
-                        requiredCheckboxes.push({
-                          input: input,
-                          label: label || name || id || 'checkbox',
-                          description: label || name || id || 'required checkbox'
-                        });
-                        console.log('[Luma Auto Register] Found required checkbox: ' + (label || name || id));
+                        // Check if this is a sponsorship/donation checkbox - DO NOT auto-check these
+                        var checkboxLabelLower = (label || name || id || '').toLowerCase();
+                        var isDonationOrSponsorCheckbox = 
+                          checkboxLabelLower.indexOf('donat') > -1 ||           // donate, donation
+                          checkboxLabelLower.indexOf('sponsor') > -1 ||         // sponsor, sponsorship
+                          checkboxLabelLower.indexOf('contribut') > -1 ||       // contribute, contribution
+                          checkboxLabelLower.indexOf('pay') > -1 ||             // pay, payment (but not "display")
+                          checkboxLabelLower.indexOf('purchase') > -1 ||        // purchase
+                          checkboxLabelLower.indexOf('upgrade') > -1 ||         // upgrade
+                          checkboxLabelLower.indexOf('premium') > -1 ||         // premium
+                          checkboxLabelLower.indexOf('funding') > -1 ||         // funding
+                          checkboxLabelLower.indexOf('financial support') > -1 ||
+                          checkboxLabelLower.indexOf('become a sponsor') > -1 ||
+                          checkboxLabelLower.indexOf('interested in sponsor') > -1;
+                        
+                        if (isDonationOrSponsorCheckbox) {
+                          console.log('[Luma Auto Register] ⚠️ Skipping donation/sponsorship checkbox (will NOT auto-check): ' + (label || name || id));
+                          // Don't add to requiredCheckboxes - we don't want to auto-check these
+                        } else {
+                          // It's a required checkbox but not terms or sponsorship - add to list (always check these)
+                          requiredCheckboxes.push({
+                            input: input,
+                            label: label || name || id || 'checkbox',
+                            description: label || name || id || 'required checkbox'
+                          });
+                          console.log('[Luma Auto Register] Found required checkbox: ' + (label || name || id));
+                        }
                       }
                     }
                   }
@@ -3087,20 +3327,30 @@ class RegistrationManager {
                   // Phone fields often have placeholder values that look like real values
                   // Exclude "telegram" from phone detection - use more specific phone terms
                   var phoneSynonyms = ['phone', 'telephone', 'mobile', 'cell', 'cell phone', 'mobile phone', 'contact number', 'phone number'];
-                  // Only match "tel" if it's not part of "telegram"
-                  var hasTel = (name && name.toLowerCase().indexOf('tel') > -1) ||
-                    (label && label.toLowerCase().indexOf('tel') > -1) ||
-                    (placeholder && placeholder.toLowerCase().indexOf('tel') > -1);
+                  
+                  // Only match "tel" if it's a standalone word (not part of "tell", "hotel", "telegram", etc.)
+                  // Use regex with word boundary to avoid false positives
+                  var telRegex = /\btel\b/i;
+                  var hasTelStandalone = (name && telRegex.test(name)) ||
+                    (label && telRegex.test(label)) ||
+                    (placeholder && telRegex.test(placeholder));
                   var hasTelegram = (name && name.toLowerCase().indexOf('telegram') > -1) ||
                     (label && label.toLowerCase().indexOf('telegram') > -1) ||
                     (placeholder && placeholder.toLowerCase().indexOf('telegram') > -1);
 
-                  var isPhoneField = (containsAny(name, phoneSynonyms) ||
+                  // Exclude dropdown triggers from phone detection
+                  var isDropdownTrigger = placeholder && (
+                    placeholder.toLowerCase().indexOf('select') > -1 ||
+                    placeholder.toLowerCase().indexOf('choose') > -1 ||
+                    placeholder.toLowerCase().indexOf('pick') > -1
+                  );
+
+                  var isPhoneField = !isDropdownTrigger && (containsAny(name, phoneSynonyms) ||
                     containsAny(label, phoneSynonyms) ||
                     containsAny(placeholder, phoneSynonyms) ||
                     type === 'tel' ||
                     containsAny(id, phoneSynonyms) ||
-                    (hasTel && !hasTelegram)) && !isTelegramField;
+                    (hasTelStandalone && !hasTelegram)) && !isTelegramField;
 
                   if (isPhoneField) {
                     var phoneValue = settings.phone || '';
@@ -3265,9 +3515,6 @@ class RegistrationManager {
                     label.indexOf('company') === -1 && label.indexOf('fund') === -1 &&
                     label.indexOf('organization') === -1 && label.indexOf('organisation') === -1 &&
                     label.indexOf('business') === -1 && label.indexOf('employer') === -1) {
-                    // #region agent log
-                    fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:3257-generic-name',message:'MATCHED generic name field',data:{label:label,placeholder:placeholder,name:name},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
-                    // #endregion
                     // Use full name if both first and last are available, otherwise use what's available
                     if (settings.firstName && settings.lastName) {
                       valueToFill = settings.firstName + ' ' + settings.lastName;
@@ -3305,9 +3552,6 @@ class RegistrationManager {
                   } else if (containsAny(name, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund']) ||
                     containsAny(label, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund']) ||
                     containsAny(placeholder, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund'])) {
-                    // #region agent log
-                    fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:3298-company',message:'MATCHED company/fund field',data:{label:label,placeholder:placeholder,name:name,settingsCompany:settings.company},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2'})}).catch(()=>{});
-                    // #endregion
                     valueToFill = settings.company || 'Independent';
                   } else if ((name.indexOf('title') > -1 || label.indexOf('job title') > -1 ||
                     label.indexOf('role') > -1 || placeholder.indexOf('title') > -1 ||
@@ -3474,9 +3718,6 @@ class RegistrationManager {
                   }
 
                   if (valueToFill && valueToFill !== '') {
-                    // #region agent log
-                    fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:3472-fill',message:'Filling field with valueToFill',data:{fieldDescription:fieldDescription,valueToFill:valueToFill,label:label},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H3'})}).catch(()=>{});
-                    // #endregion
                     fieldsToFill.push({
                       input: input,
                       value: valueToFill,
@@ -4086,15 +4327,35 @@ class RegistrationManager {
                       console.log('  Text:', (elem.textContent || '').trim().substring(0, 150));
                       console.log('  Target Element:', targetElement.tagName, targetElement.className);
 
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4087-selectOneOrMore',message:'Found Select one or more element',data:{elemTag:elem.tagName,elemClass:(elem.className||'').substring(0,100),elemTextStart:(elem.textContent||'').trim().substring(0,200),targetTag:targetElement.tagName,targetId:targetElement.id||'none',targetName:targetElement.name||'none',targetPlaceholder:targetElement.placeholder||'none',innerInputFound:!!innerInput},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H10'})}).catch(()=>{});
-                      // #endregion
-
                       // Extract label text - look for the actual label element, not parent container text
                       var labelText = '';
+                      var useElemAsTarget = false; // Flag to use elem itself as the clickable target
 
-                      // Method 1: Try to find a proper label element associated with the input
-                      if (targetElement && targetElement.tagName === 'INPUT') {
+                      // PRIORITY: If the element text is SHORT and clearly contains "XXX *Select one or more", 
+                      // extract the label directly - this is the most reliable method
+                      var elemTextForLabel = (elem.textContent || '').trim();
+                      if (elemTextForLabel.length < 100 && elemTextForLabel.toLowerCase().indexOf('select one or more') > -1) {
+                        var directMatch = elemTextForLabel.match(/^(.+?)\s*\*?\s*select one or more/i);
+                        if (directMatch && directMatch[1]) {
+                          var directLabel = directMatch[1].trim();
+                          // Add asterisk if not present but element contains one
+                          if (directLabel && elemTextForLabel.indexOf('*') > -1 && directLabel.indexOf('*') === -1) {
+                            directLabel = directLabel + ' *';
+                          }
+                          // Only use if it's a reasonable label (not "name", "email", etc. from other fields)
+                          var directLabelLower = directLabel.toLowerCase();
+                          if (directLabelLower.length > 3 && 
+                              directLabelLower !== 'name' && directLabelLower !== 'name *' &&
+                              directLabelLower !== 'email' && directLabelLower !== 'email *') {
+                            labelText = directLabel;
+                            useElemAsTarget = true; // The elem itself is the dropdown trigger!
+                            console.log('[Luma Auto Register] Extracted label directly from element text: "' + labelText + '" (will use elem as target)');
+                          }
+                        }
+                      }
+
+                      // Method 1: Try to find a proper label element associated with the input (only if no direct label found)
+                      if (!labelText && targetElement && targetElement.tagName === 'INPUT') {
                         // Look for label element using for attribute
                         if (targetElement.id) {
                           var labelForInput = document.querySelector('label[for="' + targetElement.id + '"]');
@@ -4315,9 +4576,6 @@ class RegistrationManager {
                           var match = fullText.match(/(.+?)\s*select one or more/i);
                           if (match && match[1]) {
                             labelText = match[1].trim();
-                            // #region agent log
-                            fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4315-fallbackRegex',message:'Label from regex fallback on elem text',data:{fullTextStart:fullText.substring(0,200),matchResult:match[1].substring(0,100)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H12'})}).catch(()=>{});
-                            // #endregion
                           } else {
                             // Try parent, but only if parent text is reasonable length
                             if (parent) {
@@ -4335,12 +4593,7 @@ class RegistrationManager {
                       }
 
                       // Clean up the label (remove "Select one or more" and "This field is required")
-                      var labelTextBeforeCleanup = labelText;
                       labelText = labelText.replace(/select one or more.*$/i, '').replace(/this field is required.*$/i, '').trim();
-
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4331-labelExtraction',message:'Label after extraction',data:{labelTextBeforeCleanup:labelTextBeforeCleanup.substring(0,200),labelTextAfterCleanup:labelText.substring(0,200),labelLength:labelText.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H11'})}).catch(()=>{});
-                      // #endregion
 
                       // If label is too long, try to extract just the question part
                       if (labelText.length > 160) {
@@ -4458,19 +4711,17 @@ class RegistrationManager {
                           labelTextLower.indexOf('country') === -1 &&
                           labelTextLower.indexOf('experience') === -1);
 
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:4370-dropdown',message:'Checking dropdown label validity',data:{labelTextLower:labelTextLower,isInvalidLabel:isInvalidLabel,labelLength:labelTextLower.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H4'})}).catch(()=>{});
-                      // #endregion
-
                       if (isInvalidLabel) {
                         console.log('[Luma Auto Register] Skipping dropdown with invalid label: "' + labelTextLower + '"');
                         continue;
                       }
 
                       if (!alreadyAdded && !isInvalidLabel) {
-                        console.log('[Luma Auto Register] ✓ Adding dropdown with "Select one or more" to process list: "' + labelTextLower + '"');
+                        // Use elem as target if we extracted label directly from it (it's the actual dropdown trigger)
+                        var elementToUse = useElemAsTarget ? elem : targetElement;
+                        console.log('[Luma Auto Register] ✓ Adding dropdown with "Select one or more" to process list: "' + labelTextLower + '" (using ' + (useElemAsTarget ? 'elem' : 'targetElement') + ' as target: ' + elementToUse.tagName + ')');
                         customDropdownsToProcess.push({
-                          element: targetElement,
+                          element: elementToUse,
                           label: labelTextLower,
                           isMultiSelect: true // Mark as multi-select, but we'll handle Yes/No cases
                         });
@@ -6287,9 +6538,686 @@ class RegistrationManager {
 
                           console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
 
+                          // IMMEDIATELY check for post-submit terms modal (appears right after clicking submit)
+                          // Check with short delay to let modal render
+                          setTimeout(function () {
+                            console.log('[Luma Auto Register] === QUICK CHECK FOR POST-SUBMIT TERMS MODAL (500ms after submit) ===');
+                            
+                            // Look for terms modal that appears after submit
+                            var quickTermsModal = null;
+                            var quickElements = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="overlay"], [class*="popup"], [class*="card"]');
+                            
+                            for (var qti = 0; qti < quickElements.length; qti++) {
+                              var qel = quickElements[qti];
+                              var qelText = (qel.textContent || '').toLowerCase();
+                              var qelVisible = qel.offsetParent !== null || (window.getComputedStyle(qel).display !== 'none');
+                              
+                              // Look for "Accept Terms" or signature indicators
+                              var qHasAcceptTerms = qelText.indexOf('accept terms') > -1 ||
+                                qelText.indexOf('sign & accept') > -1 ||
+                                qelText.indexOf('sign and accept') > -1 ||
+                                (qelText.indexOf('type') > -1 && qelText.indexOf('name') > -1 && qelText.indexOf('confirm') > -1) ||
+                                (qelText.indexOf('type') > -1 && qelText.indexOf('name') > -1 && qelText.indexOf('agree') > -1);
+                              
+                              if (qHasAcceptTerms && qelVisible) {
+                                quickTermsModal = qel;
+                                console.log('[Luma Auto Register] ✓ Found post-submit terms modal (quick check)!');
+                                break;
+                              }
+                            }
+                            
+                            if (quickTermsModal) {
+                              console.log('[Luma Auto Register] === HANDLING POST-SUBMIT TERMS MODAL (quick) ===');
+                              
+                              // Use a retry loop to wait for the signature input to appear
+                              // The Accept Terms modal may load the signature input asynchronously
+                              var findAndFillSignature = function(retryCount) {
+                                retryCount = retryCount || 0;
+                                var maxRetries = 10; // Up to 5 seconds total (10 x 500ms)
+                                
+                                // #region agent log H6-H8
+                                var qTermsModalEl = document.querySelector('[class*="modal"]') || document.querySelector('[role="dialog"]');
+                                var qAllInputsEverywhere = document.querySelectorAll('input');
+                                fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6485-modal',message:'Terms modal contents (retry '+retryCount+')',data:{retryCount:retryCount,allInputsCount:qAllInputsEverywhere.length,allInputs:Array.from(qAllInputsEverywhere).map(function(i,x){return{idx:x,type:i.type,placeholder:i.placeholder,value:i.value,visible:i.offsetParent!==null};})},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H6-H8'})}).catch(function(){});
+                                // #endregion
+                              
+                              // Find the signature input field - look for signature-specific placeholders
+                              // The signature input typically has placeholder like "John Smith" or "Jane Doe"
+                              // NOT "Your Name" which is the main form's name field
+                              // IMPORTANT: Signature field can be TEXTAREA (not just input!)
+                              var qSignatureInput = null;
+                              
+                              // PRIORITY: Direct search for textarea with "John Smith" placeholder (the signature field)
+                              var johnSmithTextarea = document.querySelector('textarea[placeholder*="John Smith"], textarea[placeholder*="john smith"], textarea[placeholder*="Jane Doe"], textarea[placeholder*="jane doe"]');
+                              if (johnSmithTextarea && johnSmithTextarea.offsetParent !== null && !johnSmithTextarea.value.trim()) {
+                                qSignatureInput = johnSmithTextarea;
+                                console.log('[Luma Auto Register] ✓ FOUND signature TEXTAREA with placeholder: "' + johnSmithTextarea.placeholder + '"');
+                              }
+                              
+                              var qInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
+                              
+                              console.log('[Luma Auto Register] Found ' + qInputs.length + ' text inputs/textareas in document');
+                              
+                              // #region agent log H1-H5
+                              // Also search for inputs with "john" or "smith" in placeholder anywhere in DOM
+                              var qJohnSmithInputs = [];
+                              var qEveryInput = document.querySelectorAll('input');
+                              for (var qji = 0; qji < qEveryInput.length; qji++) {
+                                var qjPh = (qEveryInput[qji].placeholder || '').toLowerCase();
+                                if (qjPh.indexOf('john') > -1 || qjPh.indexOf('smith') > -1 || qjPh.indexOf('signature') > -1) {
+                                  qJohnSmithInputs.push({idx:qji,type:qEveryInput[qji].type,placeholder:qEveryInput[qji].placeholder,visible:qEveryInput[qji].offsetParent!==null,className:qEveryInput[qji].className});
+                                }
+                              }
+                              fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6490',message:'All inputs in document',data:{count:qInputs.length,johnSmithInputsFound:qJohnSmithInputs.length,johnSmithInputs:qJohnSmithInputs,inputs:Array.from(qInputs).map(function(inp,idx){return{idx:idx,type:inp.type,placeholder:inp.placeholder,value:inp.value,visible:inp.offsetParent!==null,name:inp.name,id:inp.id,className:inp.className.substring(0,50)};})},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1-H5'})}).catch(function(){});
+                              // #endregion
+                              
+                              // NEW APPROACH: Find the Accept Terms modal container first, then find inputs INSIDE it
+                              // IMPORTANT: Signature field can be a TEXTAREA with placeholder "John Smith"
+                              var termsModalContainer = null;
+                              var allDivs = document.querySelectorAll('div');
+                              for (var tmd = 0; tmd < allDivs.length; tmd++) {
+                                var divText = (allDivs[tmd].textContent || '').toLowerCase();
+                                // The modal should contain both "accept terms" AND "sign & accept" button
+                                if (divText.indexOf('accept terms') > -1 && divText.indexOf('sign & accept') > -1) {
+                                  // Check for textareas (signature field) or inputs - look for John Smith placeholder
+                                  var textareasInside = allDivs[tmd].querySelectorAll('textarea');
+                                  var inputsInside = allDivs[tmd].querySelectorAll('input[type="text"], input:not([type])');
+                                  var allFieldsInside = textareasInside.length + inputsInside.length;
+                                  // Accept if we find textareas (likely signature field) or small number of inputs
+                                  if (textareasInside.length > 0 || (inputsInside.length > 0 && inputsInside.length <= 5)) {
+                                    termsModalContainer = allDivs[tmd];
+                                    console.log('[Luma Auto Register] ✓ Found Accept Terms modal container with ' + textareasInside.length + ' textareas and ' + inputsInside.length + ' inputs');
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              // #region agent log H12 - Terms Modal Container Search
+                              fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6516-termsModal',message:'Terms modal container search',data:{found:!!termsModalContainer,inputsInModalCount:termsModalContainer?termsModalContainer.querySelectorAll('input[type="text"], input:not([type])').length:0},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H12'})}).catch(function(){});
+                              // #endregion
+                              
+                              // If we found the terms modal container, look for ANY visible empty input/textarea inside it
+                              if (termsModalContainer) {
+                                var modalInputs = termsModalContainer.querySelectorAll('input[type="text"], input:not([type]), textarea');
+                                console.log('[Luma Auto Register] Searching ' + modalInputs.length + ' inputs/textareas INSIDE terms modal container');
+                                
+                                for (var mi = 0; mi < modalInputs.length; mi++) {
+                                  var minp = modalInputs[mi];
+                                  var mVisible = minp.offsetParent !== null;
+                                  var mValue = (minp.value || '').trim();
+                                  
+                                  console.log('[Luma Auto Register]   Modal input ' + mi + ': placeholder="' + minp.placeholder + '", visible=' + mVisible + ', value="' + mValue + '"');
+                                  
+                                  // #region agent log H13 - Modal Input Check
+                                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6540-modalInput',message:'Checking modal input',data:{idx:mi,placeholder:minp.placeholder,visible:mVisible,value:mValue,isEmpty:mValue.length===0,willUse:(mVisible&&mValue.length===0)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H13'})}).catch(function(){});
+                                  // #endregion
+                                  
+                                  // Use ANY visible empty input in the terms modal - this IS the signature field
+                                  if (mVisible && mValue.length === 0) {
+                                    qSignatureInput = minp;
+                                    console.log('[Luma Auto Register] ✓ Found signature input in terms modal: placeholder="' + minp.placeholder + '"');
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              // Fallback: Original approach for inputs NOT in a clearly identified modal
+                              if (!qSignatureInput) {
+                                console.log('[Luma Auto Register] Terms modal container not found, using fallback search...');
+                                for (var qsi = 0; qsi < qInputs.length; qsi++) {
+                                  var qinp = qInputs[qsi];
+                                  var qplaceholder = (qinp.placeholder || '').toLowerCase();
+                                  var qVisible = qinp.offsetParent !== null;
+                                  var qValue = (qinp.value || '').trim();
+                                  
+                                  // #region agent log H2-H5
+                                  var qParentText = '';
+                                  var qTempParent = qinp.parentElement;
+                                  for (var qpi = 0; qpi < 3 && qTempParent; qpi++) { qParentText += (qTempParent.textContent || '').substring(0,100); qTempParent = qTempParent.parentElement; }
+                                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6495',message:'Checking input (fallback)',data:{idx:qsi,placeholder:qinp.placeholder,visible:qVisible,value:qValue,willSkip:(!qVisible||qValue.length>0),parentTextSample:qParentText.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2-H5'})}).catch(function(){});
+                                  // #endregion
+                                  
+                                  // Skip if already has a value or not visible
+                                  if (!qVisible || qValue.length > 0) continue;
+                                  
+                                // Look specifically for signature-style placeholders
+                                // IMPORTANT: Also detect textareas (signature field uses TEXTAREA not INPUT)
+                                var isTextarea = qinp.tagName === 'TEXTAREA';
+                                var isSignaturePlaceholder = 
+                                  qplaceholder.indexOf('john') > -1 ||
+                                  qplaceholder.indexOf('smith') > -1 ||
+                                  qplaceholder.indexOf('jane') > -1 ||
+                                  qplaceholder.indexOf('doe') > -1 ||
+                                  qplaceholder.indexOf('signature') > -1 ||
+                                  qplaceholder.indexOf('sign here') > -1 ||
+                                  qplaceholder.indexOf('type your name') > -1 ||
+                                  qplaceholder.indexOf('full name') > -1 ||
+                                  isTextarea; // Any textarea in this context is likely the signature field
+                                  
+                                  // Also check if input is inside an element containing "accept terms" or "sign & accept"
+                                  var parentText = '';
+                                  var parent = qinp.parentElement;
+                                  for (var pi = 0; pi < 5 && parent; pi++) {
+                                    parentText += ' ' + (parent.textContent || '').toLowerCase();
+                                    parent = parent.parentElement;
+                                  }
+                                  var isInTermsModal = parentText.indexOf('accept terms') > -1 || 
+                                    parentText.indexOf('sign & accept') > -1 ||
+                                    parentText.indexOf('sign and accept') > -1;
+                                  
+                                  console.log('[Luma Auto Register]   Input ' + qsi + ': placeholder="' + qinp.placeholder + '", visible=' + qVisible + ', isSignature=' + isSignaturePlaceholder + ', inTermsModal=' + isInTermsModal);
+                                  
+                                  // #region agent log H2-H3
+                                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6530',message:'Signature detection result (fallback)',data:{idx:qsi,placeholder:qinp.placeholder,isSignaturePlaceholder:isSignaturePlaceholder,isInTermsModal:isInTermsModal,willMatch:(isSignaturePlaceholder||isInTermsModal)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2-H3'})}).catch(function(){});
+                                  // #endregion
+                                  
+                                  // KEY FIX: If input is inside terms modal, use it even if placeholder is "Your Name"
+                                  if (isSignaturePlaceholder || isInTermsModal) {
+                                    qSignatureInput = qinp;
+                                    console.log('[Luma Auto Register] ✓ Found signature input with placeholder: "' + qinp.placeholder + '"');
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              // #region agent log H4 + H9-H11 (Shadow DOM, iframe, custom elements)
+                              var qAllInputs = document.querySelectorAll('input');
+                              var qTextareas = document.querySelectorAll('textarea');
+                              var qContentEditable = document.querySelectorAll('[contenteditable="true"]');
+                              
+                              // H9: Search shadow DOMs for inputs
+                              var shadowInputs = [];
+                              var allShadowHosts = document.querySelectorAll('*');
+                              for (var shi = 0; shi < allShadowHosts.length; shi++) {
+                                if (allShadowHosts[shi].shadowRoot) {
+                                  var shadowInps = allShadowHosts[shi].shadowRoot.querySelectorAll('input');
+                                  for (var sii = 0; sii < shadowInps.length; sii++) {
+                                    shadowInputs.push({host: allShadowHosts[shi].tagName, placeholder: shadowInps[sii].placeholder, type: shadowInps[sii].type});
+                                  }
+                                }
+                              }
+                              
+                              // H10: Search iframes for inputs  
+                              var iframeInputs = [];
+                              var allIframes = document.querySelectorAll('iframe');
+                              for (var ifi = 0; ifi < allIframes.length; ifi++) {
+                                try {
+                                  var iframeDoc = allIframes[ifi].contentDocument || allIframes[ifi].contentWindow.document;
+                                  if (iframeDoc) {
+                                    var ifrInps = iframeDoc.querySelectorAll('input');
+                                    for (var ifii = 0; ifii < ifrInps.length; ifii++) {
+                                      iframeInputs.push({src: allIframes[ifi].src.substring(0,50), placeholder: ifrInps[ifii].placeholder, type: ifrInps[ifii].type});
+                                    }
+                                  }
+                                } catch(e) { /* cross-origin */ }
+                              }
+                              
+                              // H11: Search for any element with "john smith" in its attributes or placeholder
+                              var johnSmithElements = [];
+                              var allElems = document.querySelectorAll('*');
+                              for (var jse = 0; jse < allElems.length; jse++) {
+                                var el = allElems[jse];
+                                var ph = (el.getAttribute('placeholder') || '').toLowerCase();
+                                var val = (el.getAttribute('value') || '').toLowerCase();
+                                if (ph.indexOf('john') > -1 || ph.indexOf('smith') > -1 || val.indexOf('john') > -1) {
+                                  johnSmithElements.push({tag: el.tagName, class: el.className.substring(0,30), placeholder: el.getAttribute('placeholder'), type: el.type || el.getAttribute('type')});
+                                }
+                              }
+                              
+                              // Find any element containing "Accept Terms" text
+                              var qAcceptTermsEl = null;
+                              var qAllDivs = document.querySelectorAll('div, section, aside');
+                              for (var qd = 0; qd < qAllDivs.length && !qAcceptTermsEl; qd++) {
+                                var qdText = (qAllDivs[qd].textContent || '').toLowerCase();
+                                if (qdText.indexOf('accept terms') > -1 && qdText.indexOf('sign & accept') > -1) {
+                                  qAcceptTermsEl = qAllDivs[qd];
+                                }
+                              }
+                              var qAcceptTermsInputs = qAcceptTermsEl ? qAcceptTermsEl.querySelectorAll('input') : [];
+                              fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6545',message:'All form elements + shadow/iframe/johnsmith',data:{allInputsCount:qAllInputs.length,textareasCount:qTextareas.length,contentEditableCount:qContentEditable.length,shadowInputsCount:shadowInputs.length,shadowInputs:shadowInputs,iframeInputsCount:iframeInputs.length,iframeInputs:iframeInputs,johnSmithElementsCount:johnSmithElements.length,johnSmithElements:johnSmithElements,acceptTermsElFound:!!qAcceptTermsEl,acceptTermsInputsCount:qAcceptTermsInputs.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H4-H11'})}).catch(function(){});
+                              // #endregion
+                              
+                              // Fallback 1: Look for empty input near "Sign & Accept" button
+                              if (!qSignatureInput) {
+                                var allButtons = document.querySelectorAll('button');
+                                for (var bi = 0; bi < allButtons.length; bi++) {
+                                  var btnText = (allButtons[bi].textContent || '').toLowerCase();
+                                  if (btnText.indexOf('sign') > -1 && btnText.indexOf('accept') > -1) {
+                                    // Found Sign & Accept button, look for nearby input
+                                    var btnParent = allButtons[bi].parentElement;
+                                    for (var bp = 0; bp < 8 && btnParent && !qSignatureInput; bp++) {
+                                      var nearbyInputs = btnParent.querySelectorAll('input[type="text"], input:not([type])');
+                                      for (var ni = 0; ni < nearbyInputs.length; ni++) {
+                                        var nInput = nearbyInputs[ni];
+                                        var nPlaceholder = (nInput.placeholder || '').toLowerCase();
+                                        // Skip if it's the main form's name field or has value
+                                        if (nInput.offsetParent !== null && !(nInput.value || '').trim() && nPlaceholder !== 'your name') {
+                                          qSignatureInput = nInput;
+                                          console.log('[Luma Auto Register] ✓ Found signature input near Sign & Accept button: placeholder="' + nInput.placeholder + '"');
+                                          break;
+                                        }
+                                      }
+                                      btnParent = btnParent.parentElement;
+                                    }
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              // Fallback 2: Look for ANY visible empty text input that's NOT the main form fields
+                              if (!qSignatureInput) {
+                                var allTextInputs = document.querySelectorAll('input[type="text"], input:not([type])');
+                                for (var ati = 0; ati < allTextInputs.length; ati++) {
+                                  var atInput = allTextInputs[ati];
+                                  var atPlaceholder = (atInput.placeholder || '').toLowerCase();
+                                  var atValue = (atInput.value || '').trim();
+                                  var atVisible = atInput.offsetParent !== null;
+                                  // Skip main form fields and filled inputs
+                                  var isMainFormField = atPlaceholder === 'your name' || atPlaceholder === 'you@email.com' || atPlaceholder.indexOf('select') > -1;
+                                  if (atVisible && !atValue && !isMainFormField) {
+                                    qSignatureInput = atInput;
+                                    console.log('[Luma Auto Register] ✓ Found signature input via fallback scan: placeholder="' + atInput.placeholder + '"');
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              if (qSignatureInput) {
+                                // Fill with user's full name
+                                var qFullName = ((settings.firstName || '') + ' ' + (settings.lastName || '')).trim();
+                                if (!qFullName) qFullName = settings.name || 'Attendee';
+                                
+                                console.log('[Luma Auto Register] Filling signature with: "' + qFullName + '"');
+                                
+                                // APPROACH: Simulate actual typing to properly update React's internal state
+                                // Focus the textarea first
+                                qSignatureInput.focus();
+                                
+                                // Clear any existing value
+                                qSignatureInput.value = '';
+                                qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                
+                                // Method 1: Try native setter + events (might work for some React versions)
+                                try {
+                                  var qNativeSetter;
+                                  if (qSignatureInput.tagName === 'TEXTAREA') {
+                                    qNativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                                  } else {
+                                    qNativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                  }
+                                  qNativeSetter.call(qSignatureInput, qFullName);
+                                  console.log('[Luma Auto Register] ✓ Set signature value via native ' + qSignatureInput.tagName + ' setter');
+                                } catch (e) {
+                                  console.log('[Luma Auto Register] Native setter failed, using direct assignment: ' + e.message);
+                                  qSignatureInput.value = qFullName;
+                                }
+                                
+                                // Dispatch comprehensive events for React
+                                // InputEvent (more detailed than Event)
+                                try {
+                                  var inputEventDetailed = new InputEvent('input', {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    inputType: 'insertText',
+                                    data: qFullName
+                                  });
+                                  qSignatureInput.dispatchEvent(inputEventDetailed);
+                                } catch(e) {
+                                  var inputEvent = new Event('input', { bubbles: true, cancelable: true });
+                                  qSignatureInput.dispatchEvent(inputEvent);
+                                }
+                                
+                                // Change event
+                                var changeEvent = new Event('change', { bubbles: true, cancelable: true });
+                                qSignatureInput.dispatchEvent(changeEvent);
+                                
+                                // Method 2: Simulate typing character by character (for React 16+)
+                                // This creates keyboard events that React's synthetic event system can capture
+                                console.log('[Luma Auto Register] Simulating keyboard input for React...');
+                                for (var ci = 0; ci < qFullName.length; ci++) {
+                                  var char = qFullName[ci];
+                                  try {
+                                    qSignatureInput.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true }));
+                                    qSignatureInput.dispatchEvent(new KeyboardEvent('keypress', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, charCode: char.charCodeAt(0) }));
+                                    qSignatureInput.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true }));
+                                  } catch(e) {}
+                                }
+                                
+                                // Final input event after typing
+                                qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                
+                                // Blur to finalize
+                                qSignatureInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                                
+                                console.log('[Luma Auto Register] Signature value after fill: "' + qSignatureInput.value + '"');
+                                
+                                // Find and click "Sign & Accept" button - add delay to let React process the change
+                                setTimeout(function () {
+                                  // Verify the value is still there
+                                  console.log('[Luma Auto Register] Signature value before clicking Sign & Accept: "' + qSignatureInput.value + '"');
+                                  
+                                  // If value was cleared by React, re-fill it
+                                  if (!qSignatureInput.value.trim()) {
+                                    console.log('[Luma Auto Register] ⚠️ Signature was cleared by React! Re-filling...');
+                                    try {
+                                      var qNativeSetter2;
+                                      if (qSignatureInput.tagName === 'TEXTAREA') {
+                                        qNativeSetter2 = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                                      } else {
+                                        qNativeSetter2 = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                      }
+                                      qNativeSetter2.call(qSignatureInput, qFullName);
+                                    } catch (e) {
+                                      qSignatureInput.value = qFullName;
+                                    }
+                                    qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                    qSignatureInput.dispatchEvent(new Event('change', { bubbles: true }));
+                                  }
+                                  
+                                  var qSignButton = null;
+                                  var qButtons = quickTermsModal.querySelectorAll('button');
+                                  
+                                  console.log('[Luma Auto Register] Looking for Sign & Accept button among ' + qButtons.length + ' buttons');
+                                  
+                                  for (var qbi = 0; qbi < qButtons.length; qbi++) {
+                                    var qbtn = qButtons[qbi];
+                                    var qbtnText = (qbtn.textContent || '').toLowerCase();
+                                    console.log('[Luma Auto Register]   Button ' + qbi + ': "' + qbtnText + '"');
+                                    
+                                    if (qbtnText.indexOf('sign') > -1 && qbtnText.indexOf('accept') > -1) {
+                                      qSignButton = qbtn;
+                                      break;
+                                    }
+                                  }
+                                  
+                                  if (qSignButton) {
+                                    // One more re-fill just before clicking
+                                    console.log('[Luma Auto Register] Final signature value: "' + qSignatureInput.value + '"');
+                                    if (!qSignatureInput.value.trim()) {
+                                      qSignatureInput.value = qFullName;
+                                      qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                    }
+                                    
+                                    // Check if button is disabled
+                                    console.log('[Luma Auto Register] Sign & Accept button disabled: ' + qSignButton.disabled);
+                                    console.log('[Luma Auto Register] Sign & Accept button className: ' + qSignButton.className);
+                                    
+                                    console.log('[Luma Auto Register] Clicking "Sign & Accept" button (multiple methods)...');
+                                    
+                                    // Method 1: Direct click
+                                    qSignButton.click();
+                                    
+                                    // Method 2: MouseEvent dispatch
+                                    try {
+                                      var clickEvent = new MouseEvent('click', {
+                                        view: window,
+                                        bubbles: true,
+                                        cancelable: true,
+                                        button: 0
+                                      });
+                                      qSignButton.dispatchEvent(clickEvent);
+                                    } catch (e) {}
+                                    
+                                    // Method 3: Mousedown + mouseup
+                                    try {
+                                      qSignButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                                      qSignButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                                    } catch (e) {}
+                                    
+                                    // Method 4: Focus and Enter key
+                                    try {
+                                      qSignButton.focus();
+                                      qSignButton.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                                      qSignButton.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                                    } catch (e) {}
+                                    
+                                    console.log('[Luma Auto Register] ✓ Sign & Accept button clicked (4 methods)!');
+                                    
+                                    // After clicking Sign & Accept, wait for modal to close then click submit to finalize
+                                    setTimeout(function() {
+                                      console.log('[Luma Auto Register] Checking if terms modal is still open...');
+                                      var termsModalStillOpen = false;
+                                      var signBtnStillVisible = qSignButton && qSignButton.offsetParent !== null;
+                                      
+                                      var allDivsCheck = document.querySelectorAll('div');
+                                      for (var tdCheck = 0; tdCheck < allDivsCheck.length; tdCheck++) {
+                                        var tdText = (allDivsCheck[tdCheck].textContent || '').toLowerCase();
+                                        if (tdText.indexOf('accept terms') > -1 && tdText.indexOf('sign & accept') > -1) {
+                                          var inputsInDiv = allDivsCheck[tdCheck].querySelectorAll('textarea, input[type="text"]');
+                                          if (inputsInDiv.length > 0 && inputsInDiv.length <= 3) {
+                                            termsModalStillOpen = true;
+                                            break;
+                                          }
+                                        }
+                                      }
+                                      
+                                      if (termsModalStillOpen || signBtnStillVisible) {
+                                        console.log('[Luma Auto Register] ⚠️ Terms modal still open (signBtnVisible=' + signBtnStillVisible + ') - clicking Sign & Accept again...');
+                                        if (qSignButton && qSignButton.offsetParent !== null) {
+                                          // Re-fill signature in case it was cleared
+                                          if (qSignatureInput && !qSignatureInput.value.trim()) {
+                                            try {
+                                              var qNativeSetter3;
+                                              if (qSignatureInput.tagName === 'TEXTAREA') {
+                                                qNativeSetter3 = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                                              } else {
+                                                qNativeSetter3 = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                              }
+                                              qNativeSetter3.call(qSignatureInput, qFullName);
+                                              qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                              qSignatureInput.dispatchEvent(new Event('change', { bubbles: true }));
+                                              console.log('[Luma Auto Register] Re-filled signature: "' + qSignatureInput.value + '"');
+                                            } catch(e) {}
+                                          }
+                                          qSignButton.click();
+                                          console.log('[Luma Auto Register] ✓ Sign & Accept clicked again');
+                                        }
+                                      } else {
+                                        console.log('[Luma Auto Register] ✓ Terms modal closed! Clicking submit to finalize registration...');
+                                        
+                                        // Find and click the main submit button to finalize registration
+                                        // IMPORTANT: Prioritize type=submit buttons over type=button
+                                        var finalSubmitBtn = null;
+                                        var fallbackBtn = null;
+                                        var allBtnsAfterTerms = document.querySelectorAll('button[type="submit"], button');
+                                        
+                                        for (var fsb = 0; fsb < allBtnsAfterTerms.length; fsb++) {
+                                          var fsbText = (allBtnsAfterTerms[fsb].textContent || '').toLowerCase().trim();
+                                          var fsbType = allBtnsAfterTerms[fsb].type;
+                                          var fsbVisible = allBtnsAfterTerms[fsb].offsetParent !== null;
+                                          var fsbDisabled = allBtnsAfterTerms[fsb].disabled;
+                                          
+                                          if (fsbVisible && !fsbDisabled) {
+                                            var isRequestToJoin = fsbText.indexOf('request to join') > -1;
+                                            var isRegister = fsbText.indexOf('register') > -1;
+                                            
+                                            if (isRequestToJoin || isRegister) {
+                                              // Prioritize type=submit over type=button
+                                              if (fsbType === 'submit') {
+                                                finalSubmitBtn = allBtnsAfterTerms[fsb];
+                                                break;
+                                              } else if (!fallbackBtn) {
+                                                fallbackBtn = allBtnsAfterTerms[fsb];
+                                              }
+                                            }
+                                          }
+                                        }
+                                        
+                                        // Use fallback if no type=submit found
+                                        if (!finalSubmitBtn && fallbackBtn) {
+                                          finalSubmitBtn = fallbackBtn;
+                                        }
+                                        
+                                        if (finalSubmitBtn) {
+                                          finalSubmitBtn.focus();
+                                          finalSubmitBtn.click();
+                                          try {
+                                            finalSubmitBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                                            finalSubmitBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                                            finalSubmitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                                          } catch(e) {}
+                                          console.log('[Luma Auto Register] ✓ Final submit button clicked!');
+                                        } else {
+                                          console.log('[Luma Auto Register] ⚠️ No submit button found after terms modal');
+                                        }
+                                      }
+                                    }, 1500);
+                                  } else {
+                                    console.log('[Luma Auto Register] ⚠️ Could not find "Sign & Accept" button');
+                                  }
+                                }, 500);
+                              } else {
+                                // No signature input found - retry if we haven't exceeded max retries
+                                if (retryCount < maxRetries) {
+                                  console.log('[Luma Auto Register] ⚠️ Signature input not found yet, retrying in 500ms... (attempt ' + (retryCount + 1) + '/' + maxRetries + ')');
+                                  setTimeout(function() { findAndFillSignature(retryCount + 1); }, 500);
+                                } else {
+                                  console.log('[Luma Auto Register] ⚠️ Could not find signature input in terms modal after ' + maxRetries + ' retries');
+                                }
+                              }
+                              }; // End of findAndFillSignature function
+                              
+                              // Start the first attempt
+                              findAndFillSignature(0);
+                            } else {
+                              console.log('[Luma Auto Register] No post-submit terms modal found in quick check');
+                            }
+                          }, 500); // Quick check 500ms after submit
+
                           // Wait for submission to process and check result
                           // Use longer initial delay and multiple checks to handle slow form processing
                           setTimeout(function () {
+                            // FIRST: Check for post-submit terms modal (requires name signature)
+                            // This modal appears AFTER clicking submit on some events
+                            var handlePostSubmitTermsModal = function (callback) {
+                              console.log('[Luma Auto Register] === CHECKING FOR POST-SUBMIT TERMS MODAL ===');
+                              
+                              // Look for terms modal that appears after submit
+                              var termsModalPostSubmit = null;
+                              var allElements = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="overlay"], [class*="popup"]');
+                              
+                              for (var tmi = 0; tmi < allElements.length; tmi++) {
+                                var el = allElements[tmi];
+                                var elText = (el.textContent || '').toLowerCase();
+                                var isVisible = el.offsetParent !== null || (window.getComputedStyle(el).display !== 'none');
+                                
+                                // Look for "Accept Terms" or "Sign & Accept" indicators
+                                var hasAcceptTerms = elText.indexOf('accept terms') > -1 ||
+                                  elText.indexOf('sign & accept') > -1 ||
+                                  elText.indexOf('sign and accept') > -1 ||
+                                  (elText.indexOf('type') > -1 && elText.indexOf('name') > -1 && elText.indexOf('confirm') > -1) ||
+                                  (elText.indexOf('type') > -1 && elText.indexOf('name') > -1 && elText.indexOf('agree') > -1);
+                                
+                                if (hasAcceptTerms && isVisible) {
+                                  termsModalPostSubmit = el;
+                                  console.log('[Luma Auto Register] ✓ Found post-submit terms modal!');
+                                  break;
+                                }
+                              }
+                              
+                              if (termsModalPostSubmit) {
+                                console.log('[Luma Auto Register] === HANDLING POST-SUBMIT TERMS MODAL ===');
+                                
+                                // Find the signature input field
+                                var signatureInput = null;
+                                var inputs = termsModalPostSubmit.querySelectorAll('input[type="text"], input:not([type]), textarea');
+                                
+                                for (var si = 0; si < inputs.length; si++) {
+                                  var inp = inputs[si];
+                                  var placeholder = (inp.placeholder || '').toLowerCase();
+                                  var isVisible = inp.offsetParent !== null;
+                                  
+                                  // Look for signature-like input (placeholder with name like "John Smith")
+                                  if (isVisible && (
+                                    placeholder.indexOf('john') > -1 ||
+                                    placeholder.indexOf('smith') > -1 ||
+                                    placeholder.indexOf('jane') > -1 ||
+                                    placeholder.indexOf('name') > -1 ||
+                                    inp.type === 'text' ||
+                                    !inp.type
+                                  )) {
+                                    signatureInput = inp;
+                                    console.log('[Luma Auto Register] ✓ Found signature input with placeholder: "' + inp.placeholder + '"');
+                                    break;
+                                  }
+                                }
+                                
+                                if (signatureInput) {
+                                  // Fill with user's full name
+                                  var fullName = ((settings.firstName || '') + ' ' + (settings.lastName || '')).trim();
+                                  if (!fullName) fullName = settings.name || 'Attendee';
+                                  
+                                  console.log('[Luma Auto Register] Filling signature with: "' + fullName + '"');
+                                  
+                                  // Use React-compatible value setting
+                                  // IMPORTANT: Use HTMLTextAreaElement for textareas, HTMLInputElement for inputs
+                                  try {
+                                    var nativeSetter2;
+                                    if (signatureInput.tagName === 'TEXTAREA') {
+                                      nativeSetter2 = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                                    } else {
+                                      nativeSetter2 = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                    }
+                                    nativeSetter2.call(signatureInput, fullName);
+                                    console.log('[Luma Auto Register] ✓ Set signature value via native ' + signatureInput.tagName + ' setter');
+                                  } catch (e) {
+                                    console.log('[Luma Auto Register] Native setter failed, using direct assignment: ' + e.message);
+                                    signatureInput.value = fullName;
+                                  }
+                                  
+                                  // Dispatch events for React to recognize the change
+                                  var inputEvent2 = new Event('input', { bubbles: true, cancelable: true });
+                                  Object.defineProperty(inputEvent2, 'target', { value: signatureInput, enumerable: true, writable: false });
+                                  signatureInput.dispatchEvent(inputEvent2);
+                                  
+                                  var changeEvent2 = new Event('change', { bubbles: true, cancelable: true });
+                                  Object.defineProperty(changeEvent2, 'target', { value: signatureInput, enumerable: true, writable: false });
+                                  signatureInput.dispatchEvent(changeEvent2);
+                                  
+                                  // Also try blur event to ensure React processes the change
+                                  signatureInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                                  
+                                  console.log('[Luma Auto Register] Signature value after fill: "' + signatureInput.value + '"');
+                                  
+                                  // Find and click "Sign & Accept" button - add delay to let React process the change
+                                  setTimeout(function () {
+                                    var signButton = null;
+                                    var buttons = termsModalPostSubmit.querySelectorAll('button');
+                                    
+                                    for (var bi = 0; bi < buttons.length; bi++) {
+                                      var btn = buttons[bi];
+                                      var btnText = (btn.textContent || '').toLowerCase();
+                                      
+                                      if (btnText.indexOf('sign') > -1 && btnText.indexOf('accept') > -1) {
+                                        signButton = btn;
+                                        break;
+                                      }
+                                    }
+                                    
+                                    if (signButton) {
+                                      console.log('[Luma Auto Register] Clicking "Sign & Accept" button...');
+                                      signButton.click();
+                                      
+                                      // Wait for modal to close and then check success
+                                      setTimeout(function () {
+                                        console.log('[Luma Auto Register] ✓ Post-submit terms modal handled, proceeding to success check...');
+                                        callback();
+                                      }, 1500);
+                                    } else {
+                                      console.log('[Luma Auto Register] ⚠️ Could not find "Sign & Accept" button');
+                                      callback();
+                                    }
+                                  }, 500);
+                                } else {
+                                  console.log('[Luma Auto Register] ⚠️ Could not find signature input in terms modal');
+                                  callback();
+                                }
+                              } else {
+                                console.log('[Luma Auto Register] No post-submit terms modal found, proceeding...');
+                                callback();
+                              }
+                            };
+                            
                             // Function to start the success checking process (defined first so it can be called)
                             var startSuccessChecking = function () {
                               console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT (initial check after 2s) ===');
@@ -6640,16 +7568,24 @@ class RegistrationManager {
                               }, 3000); // Second check after 3 seconds
                             }; // End of startSuccessChecking function
 
-                            // First check if Cloudflare is present - if so, wait for it to complete before checking success
+                            // First check if Cloudflare/Turnstile is present - if so, wait for it to complete before checking success
                             var bodyText = (document.body.textContent || '').toLowerCase();
                             var bodyHTML = (document.body.innerHTML || '').toLowerCase();
+                            
+                            // Comprehensive Cloudflare/Turnstile detection
                             var hasCloudflare = bodyText.indexOf('verifying your browser') > -1 ||
                               bodyText.indexOf("we're doing a quick check") > -1 ||
                               bodyText.indexOf('verifying...') > -1 ||
+                              bodyText.indexOf('checking your browser') > -1 ||
+                              bodyText.indexOf('just a moment') > -1 ||
                               bodyText.indexOf('cloudflare') > -1 ||
                               bodyHTML.indexOf('cf-browser-verification') > -1 ||
                               bodyHTML.indexOf('challenge-platform') > -1 ||
-                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"]') !== null;
+                              bodyHTML.indexOf('turnstile') > -1 ||
+                              bodyHTML.indexOf('challenges.cloudflare.com') > -1 ||
+                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null ||
+                              // Check if page content looks like it's showing a script (common during Cloudflare challenge)
+                              (bodyText.indexOf('(function()') > -1 && bodyText.indexOf('settheme') > -1);
 
                             if (hasCloudflare) {
                               console.log('[Luma Auto Register] ⚠️ Cloudflare challenge detected - waiting for it to complete before checking success...');
@@ -6664,11 +7600,24 @@ class RegistrationManager {
                                 var stillHasCloudflare = bodyText2.indexOf('verifying your browser') > -1 ||
                                   bodyText2.indexOf("we're doing a quick check") > -1 ||
                                   bodyText2.indexOf('verifying...') > -1 ||
+                                  bodyText2.indexOf('checking your browser') > -1 ||
+                                  bodyText2.indexOf('just a moment') > -1 ||
                                   bodyHTML2.indexOf('cf-browser-verification') > -1 ||
                                   bodyHTML2.indexOf('challenge-platform') > -1 ||
-                                  document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"]') !== null;
+                                  bodyHTML2.indexOf('turnstile') > -1 ||
+                                  bodyHTML2.indexOf('challenges.cloudflare.com') > -1 ||
+                                  document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null ||
+                                  (bodyText2.indexOf('(function()') > -1 && bodyText2.indexOf('settheme') > -1);
+                                
+                                // Also check if network success was detected - if so, we can skip Cloudflare waiting
+                                var networkSuccessDetected = typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag;
 
-                                if (!stillHasCloudflare || attempts >= maxAttempts) {
+                                if (networkSuccessDetected) {
+                                  console.log('[Luma Auto Register] ✓ Network success detected - skipping remaining Cloudflare wait');
+                                  setTimeout(function () {
+                                    handlePostSubmitTermsModal(startSuccessChecking);
+                                  }, 1000); // Short delay to let page settle
+                                } else if (!stillHasCloudflare || attempts >= maxAttempts) {
                                   if (!stillHasCloudflare) {
                                     console.log('[Luma Auto Register] ✓ Cloudflare challenge completed (after ' + attempts + ' checks)!');
                                   } else {
@@ -6679,7 +7628,7 @@ class RegistrationManager {
                                   // This gives time for the success message to appear after Cloudflare completes
                                   console.log('[Luma Auto Register] Waiting 3 seconds after Cloudflare completion before checking success...');
                                   setTimeout(function () {
-                                    startSuccessChecking();
+                                    handlePostSubmitTermsModal(startSuccessChecking);
                                   }, 3000);
                                 } else {
                                   // Still waiting for Cloudflare
@@ -6693,7 +7642,7 @@ class RegistrationManager {
                               checkCloudflareComplete(0, 90);
                             } else {
                               // No Cloudflare, proceed with normal success checking
-                              startSuccessChecking();
+                              handlePostSubmitTermsModal(startSuccessChecking);
                             }
                           }, 2000); // Initial 2 second delay before checking for Cloudflare/success
 
@@ -6895,18 +7844,14 @@ class RegistrationManager {
 
                               var success = successKeywordCount > 0;
 
-                              // Fallback: trust network success flag ONLY if we have success keywords
+                              // IMPORTANT: Trust network success flag - if the API returned success, that's definitive
+                              // This handles cases where Cloudflare/Turnstile is blocking the page content check
                               if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                // Even with network flag, require at least one success keyword
-                                if (successKeywordCount > 0) {
-                                  console.log('[Luma Auto Register] ✓ Success inferred from network response + success keywords (standard submit)');
-                                  success = true;
-                                } else {
-                                  console.log('[Luma Auto Register] Network flag present but no success keywords found - not marking as success');
-                                }
+                                console.log('[Luma Auto Register] ✓ Success confirmed via network response (API returned success)');
+                                success = true;
                               }
 
-                              if (success && successKeywordCount > 0) {
+                              if (success) {
                                 console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED!');
                                 console.log('[Luma Auto Register] Success keywords found: ' + foundSuccessKeywords.join(', '));
 
@@ -6957,15 +7902,13 @@ class RegistrationManager {
 
                                   var success2 = successKeywordCount2 > 0;
 
-                                  // Fallback again to network success flag on the second check, but only with keywords
+                                  // IMPORTANT: Trust network success flag - if the API returned success, that's definitive
                                   if (!success2 && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                    if (successKeywordCount2 > 0) {
-                                      console.log('[Luma Auto Register] ✓ Success inferred from network response + success keywords (standard submit - second check)');
-                                      success2 = true;
-                                    }
+                                    console.log('[Luma Auto Register] ✓ Success confirmed via network response (API returned success - second check)');
+                                    success2 = true;
                                   }
 
-                                  if (success2 && successKeywordCount2 > 0) {
+                                  if (success2) {
                                     console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (second check)');
                                     console.log('[Luma Auto Register] Success keywords found: ' + foundSuccessKeywords2.join(', '));
 
@@ -6982,37 +7925,74 @@ class RegistrationManager {
                                       message: 'Registered successfully'
                                     });
                                   } else {
-                                    console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (second check)');
-                                    console.log('[Luma Auto Register] Success keyword count: ' + successKeywordCount2);
-                                    console.log('[Luma Auto Register] Page text sample: ' + bodyText2.substring(0, 200));
-
-                                    // Remove overlay when registration cannot be confirmed
-                                    try {
-                                      var overlay = document.getElementById('__lumaAutoRegisterOverlay');
-                                      if (overlay && overlay.parentNode) {
-                                        overlay.parentNode.removeChild(overlay);
+                                    // FINAL CHECK: Poll for network flag multiple times (async response may be slow)
+                                    console.log('[Luma Auto Register] Polling for network response (up to 10 seconds)...');
+                                    var networkPollAttempts = 0;
+                                    var maxNetworkPollAttempts = 20; // 20 attempts * 500ms = 10 seconds
+                                    
+                                    var pollForNetworkSuccess = function() {
+                                      networkPollAttempts++;
+                                      
+                                      if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                                        console.log('[Luma Auto Register] ✓ Success confirmed via network response (poll attempt ' + networkPollAttempts + ')');
+                                        try {
+                                          var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                                          if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                                        } catch (e) { }
+                                        resolve({ success: true, message: 'Registered successfully (network confirmed)' });
+                                        return;
                                       }
-                                    } catch (e) { }
+                                      
+                                      if (networkPollAttempts < maxNetworkPollAttempts) {
+                                        // Keep polling
+                                        setTimeout(pollForNetworkSuccess, 500);
+                                        return;
+                                      }
+                                      
+                                      // All polls exhausted - mark as failed
+                                      console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (final check after ' + networkPollAttempts + ' network polls)');
+                                      console.log('[Luma Auto Register] Success keyword count: ' + successKeywordCount2);
+                                      console.log('[Luma Auto Register] Page text sample: ' + bodyText2.substring(0, 200));
 
-                                    resolve({
-                                      success: false,
-                                      message: 'Could not confirm registration - please check manually'
-                                    });
+                                      // Remove overlay when registration cannot be confirmed
+                                      try {
+                                        var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                                        if (overlay && overlay.parentNode) {
+                                          overlay.parentNode.removeChild(overlay);
+                                        }
+                                      } catch (e) { }
+
+                                      resolve({
+                                        success: false,
+                                        message: 'Could not confirm registration - please check manually'
+                                      });
+                                    };
+                                    
+                                    // Start polling
+                                    pollForNetworkSuccess();
                                   }
                                 }, 3000); // Additional 3 second check
                               }
                             } // End of startSuccessCheckBlock2 function
 
-                            // First check if Cloudflare is present - if so, wait for it to complete before checking success
+                            // First check if Cloudflare/Turnstile is present - if so, wait for it to complete before checking success
                             var bodyTextCheck = (document.body.textContent || '').toLowerCase();
                             var bodyHTMLCheck = (document.body.innerHTML || '').toLowerCase();
+                            
+                            // Comprehensive Cloudflare/Turnstile detection
                             var hasCloudflareCheck = bodyTextCheck.indexOf('verifying your browser') > -1 ||
                               bodyTextCheck.indexOf("we're doing a quick check") > -1 ||
                               bodyTextCheck.indexOf('verifying...') > -1 ||
+                              bodyTextCheck.indexOf('checking your browser') > -1 ||
+                              bodyTextCheck.indexOf('just a moment') > -1 ||
                               bodyTextCheck.indexOf('cloudflare') > -1 ||
                               bodyHTMLCheck.indexOf('cf-browser-verification') > -1 ||
                               bodyHTMLCheck.indexOf('challenge-platform') > -1 ||
-                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"]') !== null;
+                              bodyHTMLCheck.indexOf('turnstile') > -1 ||
+                              bodyHTMLCheck.indexOf('challenges.cloudflare.com') > -1 ||
+                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null ||
+                              // Check if page content looks like it's showing a script (common during Cloudflare challenge)
+                              (bodyTextCheck.indexOf('(function()') > -1 && bodyTextCheck.indexOf('settheme') > -1);
 
                             if (hasCloudflareCheck) {
                               console.log('[Luma Auto Register] ⚠️ Cloudflare challenge detected - waiting for it to complete before checking success...');
@@ -7027,11 +8007,24 @@ class RegistrationManager {
                                 var stillHasCloudflare = bodyText2.indexOf('verifying your browser') > -1 ||
                                   bodyText2.indexOf("we're doing a quick check") > -1 ||
                                   bodyText2.indexOf('verifying...') > -1 ||
+                                  bodyText2.indexOf('checking your browser') > -1 ||
+                                  bodyText2.indexOf('just a moment') > -1 ||
                                   bodyHTML2.indexOf('cf-browser-verification') > -1 ||
                                   bodyHTML2.indexOf('challenge-platform') > -1 ||
-                                  document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"]') !== null;
+                                  bodyHTML2.indexOf('turnstile') > -1 ||
+                                  bodyHTML2.indexOf('challenges.cloudflare.com') > -1 ||
+                                  document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null ||
+                                  (bodyText2.indexOf('(function()') > -1 && bodyText2.indexOf('settheme') > -1);
+                                
+                                // Also check if network success was detected - if so, we can skip Cloudflare waiting
+                                var networkSuccessDetected = typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag;
 
-                                if (!stillHasCloudflare || attempts >= maxAttempts) {
+                                if (networkSuccessDetected) {
+                                  console.log('[Luma Auto Register] ✓ Network success detected - skipping remaining Cloudflare wait');
+                                  setTimeout(function () {
+                                    startSuccessCheckBlock2();
+                                  }, 1000); // Short delay to let page settle
+                                } else if (!stillHasCloudflare || attempts >= maxAttempts) {
                                   if (!stillHasCloudflare) {
                                     console.log('[Luma Auto Register] ✓ Cloudflare challenge completed (after ' + attempts + ' checks)!');
                                   } else {
@@ -7282,8 +8275,53 @@ class RegistrationManager {
 
                               console.log('[Luma Auto Register] Filtered to ' + menuOptions.length + ' valid options');
 
+                              // Check if this is a question about donations, sponsorship, or payment - ALWAYS say "No" to these
+                              var labelLower = dropdownInfo.label.toLowerCase();
+                              var isDonationOrSponsorQuestion = 
+                                labelLower.indexOf('donat') > -1 ||           // donate, donation
+                                labelLower.indexOf('sponsor') > -1 ||         // sponsor, sponsorship
+                                labelLower.indexOf('contribut') > -1 ||       // contribute, contribution
+                                labelLower.indexOf('pay') > -1 ||             // pay, payment
+                                labelLower.indexOf('purchase') > -1 ||        // purchase
+                                labelLower.indexOf('buy') > -1 ||             // buy
+                                labelLower.indexOf('upgrade') > -1 ||         // upgrade
+                                labelLower.indexOf('premium') > -1 ||         // premium
+                                labelLower.indexOf('vip') > -1 ||             // VIP (unless it's about ticket type which is handled elsewhere)
+                                labelLower.indexOf('funding') > -1 ||         // funding
+                                labelLower.indexOf('invest') > -1 ||          // invest, investment (in context of giving money)
+                                labelLower.indexOf('support financially') > -1 ||
+                                labelLower.indexOf('financial support') > -1 ||
+                                labelLower.indexOf('become a sponsor') > -1 ||
+                                labelLower.indexOf('interested in sponsor') > -1;
+
+                              // For donation/sponsor questions, ALWAYS prefer "No"
+                              if (isDonationOrSponsorQuestion && (isYesNoDropdown || isSimpleYesNoMultiSelect)) {
+                                console.log('[Luma Auto Register] ⚠️ Detected donation/sponsorship question: "' + dropdownInfo.label + '" - will select "No"');
+                                
+                                // Look for "No" option first
+                                for (var o = 0; o < menuOptions.length; o++) {
+                                  var opt = menuOptions[o];
+                                  var optText = (opt.textContent || opt.innerText || '').trim();
+                                  var optTextLower = optText.toLowerCase();
+
+                                  if (optTextLower === 'no' || optTextLower === 'not yet' || optTextLower === 'no thanks' ||
+                                    optTextLower.indexOf('no') === 0 || optTextLower.indexOf('not') === 0 ||
+                                    optTextLower.indexOf('decline') > -1 || optTextLower.indexOf('skip') > -1) {
+                                    selectedOption = opt;
+                                    console.log('[Luma Auto Register] ✓ Selected "No" for donation/sponsorship question: "' + optText + '"');
+                                    break;
+                                  }
+                                }
+                                
+                                // If no explicit "No" found, select the last option (often "No" is last)
+                                if (!selectedOption && menuOptions.length > 0) {
+                                  selectedOption = menuOptions[menuOptions.length - 1];
+                                  var optText = (selectedOption.textContent || selectedOption.innerText || '').trim();
+                                  console.log('[Luma Auto Register] ✓ Selected last option for donation/sponsorship question: "' + optText + '"');
+                                }
+                              }
                               // For simple Yes/No multi-select dropdowns (2-3 options), just select the first option
-                              if (isSimpleYesNoMultiSelect && menuOptions.length > 0) {
+                              else if (isSimpleYesNoMultiSelect && menuOptions.length > 0) {
                                 selectedOption = menuOptions[0];
                                 var optText = (selectedOption.textContent || selectedOption.innerText || '').trim();
                                 console.log('[Luma Auto Register] Selecting first option for simple Yes/No multi-select: "' + optText + '"');
@@ -7362,6 +8400,71 @@ class RegistrationManager {
 
                                 if (labelLower.indexOf('organization') > -1 || labelLower.indexOf('company type') > -1) {
                                   if (settings.company) settingsToCheck.push(settings.company);
+                                }
+
+                                // Check for city fields (city, city of residence, where are you located, etc.)
+                                if (labelLower.indexOf('city') > -1 || labelLower.indexOf('location') > -1 ||
+                                  labelLower.indexOf('where are you') > -1 || labelLower.indexOf('based in') > -1) {
+                                  if (settings.city) settingsToCheck.push(settings.city);
+                                  // Also check state if available (some city dropdowns include state)
+                                  if (settings.state) settingsToCheck.push(settings.state);
+                                }
+
+                                // Check for state/province fields
+                                if (labelLower.indexOf('state') > -1 || labelLower.indexOf('province') > -1 ||
+                                  labelLower.indexOf('region') > -1) {
+                                  if (settings.state) settingsToCheck.push(settings.state);
+                                }
+
+                                // Check for timezone fields
+                                if (labelLower.indexOf('timezone') > -1 || labelLower.indexOf('time zone') > -1 ||
+                                  labelLower.indexOf('time-zone') > -1) {
+                                  if (settings.timezone) {
+                                    settingsToCheck.push(settings.timezone);
+                                    // Also add common timezone name variations
+                                    var tzMap = {
+                                      'America/New_York': ['Eastern', 'ET', 'EST', 'EDT', 'Eastern Time', 'New York'],
+                                      'America/Chicago': ['Central', 'CT', 'CST', 'CDT', 'Central Time', 'Chicago'],
+                                      'America/Denver': ['Mountain', 'MT', 'MST', 'MDT', 'Mountain Time', 'Denver'],
+                                      'America/Los_Angeles': ['Pacific', 'PT', 'PST', 'PDT', 'Pacific Time', 'Los Angeles'],
+                                      'America/Toronto': ['Eastern', 'ET', 'Toronto'],
+                                      'America/Vancouver': ['Pacific', 'PT', 'Vancouver'],
+                                      'Europe/London': ['GMT', 'BST', 'London', 'UK', 'Britain'],
+                                      'Europe/Berlin': ['CET', 'CEST', 'Berlin', 'Central European'],
+                                      'Europe/Paris': ['CET', 'CEST', 'Paris', 'Central European'],
+                                      'Asia/Tokyo': ['JST', 'Tokyo', 'Japan']
+                                    };
+                                    if (tzMap[settings.timezone]) {
+                                      for (var tz = 0; tz < tzMap[settings.timezone].length; tz++) {
+                                        settingsToCheck.push(tzMap[settings.timezone][tz]);
+                                      }
+                                    }
+                                  }
+                                }
+
+                                // Check for pronouns fields
+                                if (labelLower.indexOf('pronoun') > -1) {
+                                  if (settings.pronouns) settingsToCheck.push(settings.pronouns);
+                                }
+
+                                // Check for t-shirt size fields
+                                if (labelLower.indexOf('shirt') > -1 || labelLower.indexOf('t-shirt') > -1 ||
+                                  labelLower.indexOf('tshirt') > -1 || labelLower.indexOf('size') > -1) {
+                                  if (settings.tshirtSize) settingsToCheck.push(settings.tshirtSize);
+                                }
+
+                                // Check for dietary restrictions fields
+                                if (labelLower.indexOf('dietary') > -1 || labelLower.indexOf('diet') > -1 ||
+                                  labelLower.indexOf('food') > -1 || labelLower.indexOf('allergies') > -1) {
+                                  if (settings.dietaryRestrictions) settingsToCheck.push(settings.dietaryRestrictions);
+                                }
+
+                                // Check for crypto/web3 experience fields
+                                if (labelLower.indexOf('crypto') > -1 || labelLower.indexOf('web3') > -1 ||
+                                  labelLower.indexOf('blockchain') > -1) {
+                                  if (settings.cryptoExperience) settingsToCheck.push(settings.cryptoExperience);
+                                  if (settings.primaryInterest) settingsToCheck.push(settings.primaryInterest);
+                                  if (settings.involvementLevel) settingsToCheck.push(settings.involvementLevel);
                                 }
 
                                 // Check for country fields (country, country of residence, etc.)
@@ -7641,8 +8744,9 @@ class RegistrationManager {
 
                                 if (matchedOption) {
                                   selectedOption = matchedOption;
-                                } else {
-                                  // No match found, select first valid option as fallback
+                                } else if (settings.autoSelectFirstOption !== false) {
+                                  // No match found, select first valid option as fallback (if enabled)
+                                  console.log('[Luma Auto Register] autoSelectFirstOption setting: ' + settings.autoSelectFirstOption + ' (type: ' + typeof settings.autoSelectFirstOption + ')');
                                   for (var o = 0; o < menuOptions.length; o++) {
                                     var opt = menuOptions[o];
                                     var optText = (opt.textContent || opt.innerText || '').trim();
@@ -7661,6 +8765,9 @@ class RegistrationManager {
                                     }
                                     break;
                                   }
+                                } else {
+                                  // autoSelectFirstOption is disabled - skip this dropdown
+                                  console.log('[Luma Auto Register] ⚠️ No settings match found and auto-select first option is DISABLED - skipping dropdown: "' + dropdownInfo.label + '"');
                                 }
                               }
 
@@ -7996,17 +9103,21 @@ class RegistrationManager {
                                     }
                                   }
 
-                                  // Use matched options if found, otherwise use first 2-3 unmatched options
+                                  // Use matched options if found, otherwise use first option as fallback (if enabled)
                                   if (matchedOptions.length > 0) {
                                     optionsToSelect = matchedOptions;
                                     console.log('[Luma Auto Register] Found ' + matchedOptions.length + ' matching options from settings');
-                                  } else {
+                                  } else if (settings.autoSelectFirstOption !== false) {
                                     // No matches found, select ONLY the first option as a safe fallback.
                                     // Previously we chose the first 2-3 options, but this can be overly
                                     // aggressive for questions where a single choice is expected.
                                     var maxSelections = Math.min(1, unmatchedOptions.length);
                                     optionsToSelect = unmatchedOptions.slice(0, maxSelections);
                                     console.log('[Luma Auto Register] No settings matches found, selecting first ' + optionsToSelect.length + ' option(s)');
+                                  } else {
+                                    // autoSelectFirstOption is disabled - don't select anything
+                                    optionsToSelect = [];
+                                    console.log('[Luma Auto Register] ⚠️ No settings match found and auto-select first option is DISABLED - skipping multi-select dropdown');
                                   }
 
                                   // Select each option one by one
@@ -8395,6 +9506,221 @@ class RegistrationManager {
                           }
                         }, 5)
                       }, 500)
+                    } else {
+                      // INDEX IS LESS THAN LENGTH - PROCESS THIS DROPDOWN
+                      // This else block handles the actual dropdown processing when we haven't finished yet
+                      var dropdownInfo = customDropdownsToProcess[index];
+                      var dropdown = dropdownInfo.element;
+                      var isMultiSelect = dropdownInfo.isMultiSelect || false;
+                      var labelKey = (dropdownInfo.label || '').toLowerCase();
+
+                      // Skip duplicate logical questions (same label) to avoid repeatedly
+                      // opening the same "Which one are you?" dropdown several times.
+                      if (labelKey && processedDropdownLabels[labelKey]) {
+                        console.log('[Luma Auto Register] Skipping duplicate custom dropdown for label: ' + labelKey);
+                        processCustomDropdown(index + 1);
+                        return;
+                      }
+                      if (labelKey) {
+                        processedDropdownLabels[labelKey] = true;
+                      }
+
+                      console.log('[Luma Auto Register] Processing custom dropdown ' + (index + 1) + '/' + customDropdownsToProcess.length + ': ' + dropdownInfo.label + (isMultiSelect ? ' (multi-select)' : ''));
+
+                      try {
+                        // Click to open dropdown - try clicking the input or its parent container
+                        var clickTarget = dropdown;
+
+                        // For Luma dropdowns, might need to click parent container
+                        var parentClickable = dropdown.closest('[role="combobox"], [class*="select"], [class*="Select"], [class*="dropdown"]');
+                        if (parentClickable) {
+                          clickTarget = parentClickable;
+                        }
+
+                        clickTarget.click();
+                        console.log('[Luma Auto Register] Clicked to open dropdown');
+
+                        // Wait for dropdown menu to appear and find options
+                        setTimeout(function() {
+                          // FIRST: Try to find options directly (Luma uses lux-menu-item for options)
+                          var directOptions = document.querySelectorAll('[class*="lux-menu-item"]:not([aria-disabled="true"])');
+                          var visibleDirectOptions = [];
+                          for (var do1 = 0; do1 < directOptions.length; do1++) {
+                            if (directOptions[do1].offsetParent !== null) {
+                              visibleDirectOptions.push(directOptions[do1]);
+                            }
+                          }
+                          
+                          if (visibleDirectOptions.length > 0) {
+                            console.log('[Luma Auto Register] Found ' + visibleDirectOptions.length + ' visible lux-menu-item options directly');
+                            
+                            // Check if autoSelectFirstOption is enabled before selecting first option
+                            if (settings.autoSelectFirstOption === false) {
+                              console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown without match');
+                              // Close the dropdown by clicking elsewhere
+                              document.body.click();
+                              setTimeout(function() {
+                                processCustomDropdown(index + 1);
+                              }, 300);
+                              return;
+                            }
+                            
+                            // Click the first option
+                            var firstOpt = visibleDirectOptions[0];
+                            console.log('[Luma Auto Register] Clicking first option: "' + (firstOpt.textContent || '').trim().substring(0, 50) + '"');
+                            firstOpt.click();
+                            // Move to next dropdown
+                            setTimeout(function() {
+                              processCustomDropdown(index + 1);
+                            }, 600);
+                            return;
+                          }
+                          
+                          // SECOND: Look for dropdown menu container
+                          var menuSelectors = [
+                            '[role="listbox"]',
+                            '[role="menu"]',
+                            '[class*="menu-content"]',
+                            '[class*="dropdown-menu"]',
+                            '[class*="menu-items"]',
+                            '[class*="select-menu"]',
+                            '[class*="select-options"]',
+                            '[class*="options-list"]'
+                          ];
+
+                          var menuWrapper = null;
+                          for (var ms = 0; ms < menuSelectors.length; ms++) {
+                            var menus = document.querySelectorAll(menuSelectors[ms]);
+                            for (var mi = 0; mi < menus.length; mi++) {
+                              var menuEl = menus[mi];
+                              // Skip if not visible
+                              if (menuEl.offsetParent === null) continue;
+                              // Skip if it's a logo, header, or nav element
+                              var menuClass = (menuEl.className || '').toLowerCase();
+                              if (menuClass.indexOf('logo') > -1 || 
+                                  menuClass.indexOf('header') > -1 || 
+                                  menuClass.indexOf('nav') > -1 ||
+                                  menuClass.indexOf('trigger') > -1) {
+                                continue;
+                              }
+                              menuWrapper = menuEl;
+                              break;
+                            }
+                            if (menuWrapper) break;
+                          }
+
+                          if (!menuWrapper) {
+                            console.log('[Luma Auto Register] ⚠️ Could not find dropdown menu with selectors, trying to find options directly');
+                            // Try to find visible options anywhere with role="option"
+                            var allOptions = document.querySelectorAll('[role="option"]:not([aria-disabled="true"])');
+                            var visibleOptions = [];
+                            for (var vo = 0; vo < allOptions.length; vo++) {
+                              if (allOptions[vo].offsetParent !== null) {
+                                visibleOptions.push(allOptions[vo]);
+                              }
+                            }
+                            
+                            if (visibleOptions.length > 0) {
+                              console.log('[Luma Auto Register] Found ' + visibleOptions.length + ' visible options with role="option"');
+                              
+                              // Check if autoSelectFirstOption is enabled
+                              if (settings.autoSelectFirstOption === false) {
+                                console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
+                                document.body.click();
+                                setTimeout(function() {
+                                  processCustomDropdown(index + 1);
+                                }, 300);
+                                return;
+                              }
+                              
+                              // Select the first option
+                              var firstOption = visibleOptions[0];
+                              console.log('[Luma Auto Register] Clicking first option: "' + (firstOption.textContent || '').trim() + '"');
+                              firstOption.click();
+                              // Move to next dropdown after selection
+                              setTimeout(function() {
+                                processCustomDropdown(index + 1);
+                              }, 600);
+                              return;
+                            }
+                            
+                            // Try looking for Luma's specific menu items
+                            var lumaMenuItems = document.querySelectorAll('[class*="lux-menu-item"]:not([aria-disabled="true"])');
+                            var visibleLumaItems = [];
+                            for (var li = 0; li < lumaMenuItems.length; li++) {
+                              if (lumaMenuItems[li].offsetParent !== null) {
+                                visibleLumaItems.push(lumaMenuItems[li]);
+                              }
+                            }
+                            
+                            if (visibleLumaItems.length > 0) {
+                              console.log('[Luma Auto Register] Found ' + visibleLumaItems.length + ' visible Luma menu items');
+                              
+                              // Check if autoSelectFirstOption is enabled
+                              if (settings.autoSelectFirstOption === false) {
+                                console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
+                                document.body.click();
+                                setTimeout(function() {
+                                  processCustomDropdown(index + 1);
+                                }, 300);
+                                return;
+                              }
+                              
+                              var firstItem = visibleLumaItems[0];
+                              console.log('[Luma Auto Register] Clicking first item: "' + (firstItem.textContent || '').trim() + '"');
+                              firstItem.click();
+                              setTimeout(function() {
+                                processCustomDropdown(index + 1);
+                              }, 600);
+                              return;
+                            }
+                            
+                            console.log('[Luma Auto Register] No dropdown options found, moving to next');
+                            // Move to next dropdown
+                            setTimeout(function() {
+                              processCustomDropdown(index + 1);
+                            }, 500);
+                            return;
+                          }
+
+                          console.log('[Luma Auto Register] Found dropdown menu: ' + menuWrapper.className);
+
+                          // Find options
+                          var options = menuWrapper.querySelectorAll('[role="option"]:not([aria-disabled="true"])');
+                          if (options.length === 0) {
+                            options = menuWrapper.querySelectorAll('[class*="lux-menu-item"]:not([aria-disabled="true"])');
+                          }
+                          if (options.length === 0) {
+                            options = menuWrapper.querySelectorAll('div[class*="item"], li, button');
+                          }
+
+                          console.log('[Luma Auto Register] Found ' + options.length + ' options');
+
+                          if (options.length > 0) {
+                            // Check if autoSelectFirstOption is enabled
+                            if (settings.autoSelectFirstOption === false) {
+                              console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
+                              document.body.click(); // Close the dropdown
+                            } else {
+                              // For single-select, just click the first option
+                              var firstOption = options[0];
+                              console.log('[Luma Auto Register] Clicking option: "' + (firstOption.textContent || '').trim() + '"');
+                              firstOption.click();
+                            }
+                          }
+
+                          // Move to next dropdown
+                          setTimeout(function() {
+                            processCustomDropdown(index + 1);
+                          }, 600);
+                        }, 500);
+                      } catch (error) {
+                        console.log('[Luma Auto Register] ⚠️ Error processing dropdown: ' + error);
+                        // Continue with next dropdown
+                        setTimeout(function() {
+                          processCustomDropdown(index + 1);
+                        }, 500);
+                      }
                     }
                   } // End of processCustomDropdown function
 
@@ -9536,7 +10862,7 @@ class RegistrationManager {
                                               "you're in", "you're going", "you're registered",
                                               "you are registered", "already registered",
                                               "registration confirmed", "request sent", "pending approval",
-                                              "approval required", "request pending",
+                                              "your request has been submitted", "request pending",
                                               "we will let you know when the host approves",
                                               "you're on the waitlist", "youre on the waitlist", "on the waitlist",
                                               "thank you for joining", "thanks for joining"
@@ -9634,7 +10960,7 @@ class RegistrationManager {
                                 "on the waitlist",              // Waitlisted
                                 "request sent",                 // Registration request submitted
                                 "request pending",              // Registration request pending
-                                "approval required",            // Registration submitted, approval needed
+                                "your request has been submitted", // Registration submitted, approval needed
                                 "thank you for joining",        // Confirmed registration (success message)
                                 "thanks for joining"            // Confirmed registration (success message)
                               ];
@@ -9650,6 +10976,20 @@ class RegistrationManager {
                                 }
                               }
 
+                              // CRITICAL: Don't mark as successful if we filled 0 fields and there are validation errors
+                              // This prevents false positives where "approval required" or similar text appears on the page BEFORE registration
+                              if (success && fieldsToFill.length === 0 && hasValidationErrors) {
+                                console.log('[Luma Auto Register] ⚠️ Ignoring success phrase - no fields were filled and validation errors detected');
+                                console.log('[Luma Auto Register] This is likely a false positive from page content, not actual registration success');
+                                success = false;
+                              }
+
+                              // IMPORTANT: Also check network success flag
+                              if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                                console.log('[Luma Auto Register] ✓ Success confirmed via network response');
+                                success = true;
+                              }
+                              
                               if (success) {
                                 console.log('[Luma Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
                                 var message = 'Registered successfully';
@@ -9661,16 +11001,35 @@ class RegistrationManager {
                                   message: message
                                 });
                               } else {
-                                console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION');
-                                console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 300));
-                                var errorMsg = 'Could not confirm registration - please verify manually';
-                                if (hasValidationErrors) {
-                                  errorMsg += ' (validation errors detected)';
-                                }
-                                resolve({
-                                  success: false,
-                                  message: errorMsg
-                                });
+                                // Poll for network flag (async response may be slow)
+                                console.log('[Luma Auto Register] First check failed, polling for network response...');
+                                var pollAttempts = 0;
+                                var maxPollAttempts = 10; // 10 attempts * 500ms = 5 seconds
+                                
+                                var pollForNetwork = function() {
+                                  pollAttempts++;
+                                  if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                                    console.log('[Luma Auto Register] ✓ Success confirmed via network response (poll ' + pollAttempts + ')');
+                                    resolve({ success: true, message: 'Registered successfully (network confirmed)' });
+                                    return;
+                                  }
+                                  if (pollAttempts < maxPollAttempts) {
+                                    setTimeout(pollForNetwork, 500);
+                                    return;
+                                  }
+                                  // All polls exhausted
+                                  console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (after ' + pollAttempts + ' network polls)');
+                                  console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 300));
+                                  var errorMsg = 'Could not confirm registration - please verify manually';
+                                  if (hasValidationErrors) {
+                                    errorMsg += ' (validation errors detected)';
+                                  }
+                                  resolve({
+                                    success: false,
+                                    message: errorMsg
+                                  });
+                                };
+                                pollForNetwork();
                               }
                             }, 2500); // Wait 2.5 seconds for submission to complete (reduced from 4000ms)
                           }, 1000); // Wait 1 second for button to enable (reduced from 1500ms)
@@ -9849,7 +11208,7 @@ class RegistrationManager {
                                   "you're in", "you're going", "you're registered",
                                   "you are registered", "already registered",
                                   "registration confirmed", "request sent", "pending approval",
-                                  "approval required", "request pending",
+                                  "your request has been submitted", "request pending",
                                   "we will let you know when the host approves",
                                   "you're on the waitlist", "youre on the waitlist", "on the waitlist",
                                   "thank you for joining", "thanks for joining"
@@ -9956,7 +11315,7 @@ class RegistrationManager {
                                           "you're in", "you're going", "you're registered",
                                           "you are registered", "already registered",
                                           "registration confirmed", "request sent", "pending approval",
-                                          "approval required", "request pending",
+                                          "your request has been submitted", "request pending",
                                           "we will let you know when the host approves",
                                           "you're on the waitlist", "youre on the waitlist", "on the waitlist",
                                           "thank you for joining", "thanks for joining"
@@ -10032,7 +11391,7 @@ class RegistrationManager {
                             "successfully registered",
                             "request sent",
                             "pending approval",
-                            "approval required",
+                            "your request has been submitted",
                             "request pending",
                             "we will let you know when the host approves",
                             "you're on the waitlist",
@@ -10053,6 +11412,20 @@ class RegistrationManager {
                             }
                           }
 
+                          // CRITICAL: Don't mark as successful if we filled 0 fields and there are validation errors
+                          // This prevents false positives where success-like text appears on the page BEFORE registration
+                          if (success && fieldsToFill.length === 0 && hasValidationErrors) {
+                            console.log('[Luma Auto Register] ⚠️ Ignoring success phrase - no fields were filled and validation errors detected');
+                            console.log('[Luma Auto Register] This is likely a false positive from page content, not actual registration success');
+                            success = false;
+                          }
+
+                          // IMPORTANT: Also check network success flag
+                          if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                            console.log('[Luma Auto Register] ✓ Success confirmed via network response');
+                            success = true;
+                          }
+                          
                           if (success) {
                             console.log('[Luma Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
                             var message = 'Registered successfully';
@@ -10064,16 +11437,35 @@ class RegistrationManager {
                               message: message
                             });
                           } else {
-                            console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION');
-                            console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 300));
-                            var errorMsg = 'Could not confirm registration - please verify manually';
-                            if (hasValidationErrors) {
-                              errorMsg += ' (validation errors detected)';
-                            }
-                            resolve({
-                              success: false,
-                              message: errorMsg
-                            });
+                            // Poll for network flag (async response may be slow)
+                            console.log('[Luma Auto Register] First check failed, polling for network response...');
+                            var netPollAttempts = 0;
+                            var maxNetPollAttempts = 10; // 10 attempts * 500ms = 5 seconds
+                            
+                            var pollForNetworkFlag = function() {
+                              netPollAttempts++;
+                              if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                                console.log('[Luma Auto Register] ✓ Success confirmed via network response (poll ' + netPollAttempts + ')');
+                                resolve({ success: true, message: 'Registered successfully (network confirmed)' });
+                                return;
+                              }
+                              if (netPollAttempts < maxNetPollAttempts) {
+                                setTimeout(pollForNetworkFlag, 500);
+                                return;
+                              }
+                              // All polls exhausted
+                              console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (after ' + netPollAttempts + ' network polls)');
+                              console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 300));
+                              var errorMsg = 'Could not confirm registration - please verify manually';
+                              if (hasValidationErrors) {
+                                errorMsg += ' (validation errors detected)';
+                              }
+                              resolve({
+                                success: false,
+                                message: errorMsg
+                              });
+                            };
+                            pollForNetworkFlag();
                           }
                         }, 4000); // Wait 4 seconds for submission to complete
 

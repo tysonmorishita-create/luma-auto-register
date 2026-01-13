@@ -41,7 +41,8 @@ class SettingsController {
       genericAnswer1: 'To be provided',
       // Options
       autoAcceptTerms: true,
-      skipManualFields: false
+      skipManualFields: false,
+      autoSelectFirstOption: true  // Speed mode: auto-select first dropdown option when no match
     };
     
     this.init();
@@ -191,6 +192,7 @@ class SettingsController {
     // Location & Demographics
     this.country = document.getElementById('country');
     this.city = document.getElementById('city');
+    this.state = document.getElementById('state');
     this.timezone = document.getElementById('timezone');
     this.pronouns = document.getElementById('pronouns');
     // Professional Details
@@ -212,6 +214,7 @@ class SettingsController {
     // Options
     this.autoAcceptTerms = document.getElementById('autoAcceptTerms');
     this.skipManualFields = document.getElementById('skipManualFields');
+    this.autoSelectFirstOption = document.getElementById('autoSelectFirstOption');
     
     this.saveBtn = document.getElementById('saveBtn');
     this.resetBtn = document.getElementById('resetBtn');
@@ -286,6 +289,7 @@ class SettingsController {
     // Location & Demographics
     this.country.value = settings.country || '';
     this.city.value = settings.city || '';
+    if (this.state) this.state.value = settings.state || '';
     this.timezone.value = settings.timezone || '';
     this.pronouns.value = settings.pronouns || '';
     // Professional Details
@@ -307,6 +311,7 @@ class SettingsController {
     // Options
     this.autoAcceptTerms.checked = settings.autoAcceptTerms !== false;
     this.skipManualFields.checked = settings.skipManualFields || false;
+    if (this.autoSelectFirstOption) this.autoSelectFirstOption.checked = settings.autoSelectFirstOption !== false; // Default true
   }
 
   async saveSettings() {
@@ -351,6 +356,7 @@ class SettingsController {
       // Location & Demographics
       country: this.country.value.trim(),
       city: this.city.value.trim(),
+      state: this.state ? this.state.value.trim() : '',
       timezone: this.timezone.value.trim(),
       pronouns: this.pronouns.value.trim(),
       // Professional Details
@@ -371,7 +377,8 @@ class SettingsController {
       genericAnswer1: this.genericAnswer1.value.trim(),
       // Options
       autoAcceptTerms: this.autoAcceptTerms.checked,
-      skipManualFields: this.skipManualFields.checked
+      skipManualFields: this.skipManualFields.checked,
+      autoSelectFirstOption: this.autoSelectFirstOption ? this.autoSelectFirstOption.checked : true
     };
 
     await chrome.storage.local.set({ userSettings: settings });
