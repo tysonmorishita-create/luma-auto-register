@@ -1,6 +1,6 @@
 # Luma Auto Register - Chrome Extension
 
-Automatically register for multiple Luma events from calendar pages. Perfect for registering for hundreds of events quickly and efficiently.
+Automatically register for multiple Luma events from calendar pages. Perfect for registering for hundreds of events quickly and efficiently. Supports **team workflows** with a shared Google Sheets database to track registrations across multiple people.
 
 ## Features
 
@@ -13,6 +13,9 @@ Automatically register for multiple Luma events from calendar pages. Perfect for
 - 💾 **Export Results**: Download CSV report of all registration attempts
 - ⏸️ **Pause/Resume**: Control the registration process at any time
 - 🎯 **Configurable**: Adjust parallel tabs and delay between registrations
+- 🗄️ **Google Sheets Database**: Track registrations in a shared spreadsheet for team coordination
+- 👥 **Multi-Person Support**: Each team member's registrations tracked separately by email
+- 📅 **Per-Calendar Organization**: Automatic tabs for each calendar/conference (CHK2026, ethdenver, etc.)
 
 ## Prerequisites
 
@@ -47,7 +50,7 @@ Automatically register for multiple Luma events from calendar pages. Perfect for
 
 ## Setup
 
-### Important: Prepare Your Luma Account
+### Step 1: Prepare Your Luma Account
 
 Before using the extension, ensure:
 
@@ -56,6 +59,91 @@ Before using the extension, ensure:
 3. **Test manual registration** on one event to ensure Luma has your info saved
    - If Luma offers "one-click registration", you're ready!
    - If you have to fill out forms each time, the extension may have issues
+
+### Step 2: Configure the Extension
+
+1. Click the extension icon and go to **Settings**
+2. Enter your **Registration Email** - this is how your registrations are tracked
+3. Enter your **Registration Name** - used for form filling
+4. Enter the **Google Sheets API URL** (get this from your team admin - see below)
+5. Click **Save Settings**
+
+### Step 3: Google Sheets Database Setup (Admin Only)
+
+The extension uses Google Sheets as a shared database. One person sets this up for the team:
+
+#### Create the Google Apps Script API:
+
+1. **Create a new Google Sheet** for tracking registrations
+2. Go to **Extensions > Apps Script**
+3. Delete the default code and paste the contents of `google-apps-script.js` from this repo
+4. Click **Deploy > New deployment**
+5. Choose **Web app** as the type
+6. Set **Execute as**: "Me"
+7. Set **Who has access**: "Anyone" (or "Anyone with Google account" for more security)
+8. Click **Deploy** and copy the Web App URL
+9. Share this URL with your team members to put in their extension settings
+
+#### What the Database Tracks:
+
+| Column | Description |
+|--------|-------------|
+| event_url | The Luma event URL (used for matching) |
+| title | Event name |
+| event_date | When the event occurs |
+| person_email | Who registered (case-insensitive matching) |
+| person_name | Name used for registration |
+| calendar | Which calendar/conference (auto-detected from URL) |
+| registered_at | Timestamp of registration |
+
+#### How Registrations Are Matched:
+
+When scanning events, the extension checks the database using:
+- **Event URL** (exact match)
+- **Person Email** (case-insensitive)
+
+If a match is found, that event shows as "Registered" for that person. Name is NOT used for matching, so slight name variations won't cause duplicates.
+
+#### Automatic Calendar Organization:
+
+The database automatically creates separate tabs based on the calendar URL:
+- Scanning `lu.ma/calendar/CHK2026` → Creates "CHK2026" tab
+- Scanning `lu.ma/ethdenver` → Creates "ethdenver" tab
+- A **"Master"** tab contains all registrations across all calendars
+
+This keeps registrations organized by conference/event series.
+
+#### Migrating Existing Data (Optional):
+
+If you have registration data in an old format (e.g., tabs named "VITO PENDING", "MICHAEL PENDING"), you can migrate it:
+
+1. Open the Apps Script editor (Extensions > Apps Script)
+2. Find the `MIGRATION_CONFIG` array near the bottom
+3. Update it with your old tab names and person info:
+   ```javascript
+   const MIGRATION_CONFIG = [
+     { oldTabName: 'VITO PENDING', personEmail: 'vito@company.io', personName: 'Vito', targetCalendar: 'CHK2026' },
+     { oldTabName: 'MICHAEL PENDING', personEmail: 'mike@company.io', personName: 'Michael', targetCalendar: 'CHK2026' }
+   ];
+   ```
+4. Run `previewMigration()` first to see what would be imported (dry run)
+5. Run `migrateOldData()` to perform the actual migration
+6. Only checked rows (Column C = true) will be imported
+
+## Team Onboarding
+
+For team members joining an existing setup:
+
+1. **Download the extension** from GitHub (Code > Download ZIP)
+2. **Extract** the ZIP file
+3. **Load in Chrome**: Go to `chrome://extensions/`, enable Developer Mode, click "Load unpacked", select the extracted folder
+4. **Configure settings**: Click extension icon > Settings
+   - Enter YOUR email address (this identifies your registrations)
+   - Enter your name
+   - Enter the **Google Sheets API URL** (get this from your team admin)
+5. **Test**: Scan a calendar page and verify it shows previously registered events
+
+That's it! All registrations will now be tracked in the shared database.
 
 ## Usage
 
@@ -125,8 +213,17 @@ After completion:
 1. Extension opens the calendar page in a background tab
 2. Scrapes all event links matching `lu.ma/[event-id]` or `luma.com/[event-id]`
 3. Filters out non-event pages (calendars, profiles, etc.)
-4. Extracts event titles and URLs
-5. Presents them to you for selection
+4. Extracts event titles, URLs, and dates (including relative dates like "Tomorrow")
+5. **Checks Google Sheets database** to see which events you've already registered for
+6. Marks events as "Registered", "Available", or "NEW" based on database status
+7. Presents them to you for selection (registered events shown greyed out)
+
+### Database Check
+
+When scanning, the extension queries the Google Sheets database:
+- **Registered**: You (your email) have already registered for this event
+- **Available**: Someone else on the team registered, but you haven't
+- **NEW**: No one has registered for this event yet
 
 ### Registration Phase
 
@@ -139,7 +236,8 @@ For each selected event:
 5. Waits for form/modal to appear
 6. Clicks submit button
 7. Waits to detect success or failure
-8. Closes the tab and moves to next event
+8. **Saves successful registration to Google Sheets database**
+9. Closes the tab and moves to next event
 
 ### Success Detection
 
@@ -211,9 +309,9 @@ For 100+ events:
 
 ## Privacy & Security
 
-- **No data collection**: Extension doesn't collect or transmit your data
-- **Local storage only**: All data stored locally in your browser
-- **No external servers**: Extension operates entirely in your browser
+- **Your data, your Sheet**: Registration data only goes to YOUR Google Sheet
+- **No third-party servers**: Extension only communicates with your own Google Apps Script
+- **Email used for matching**: Your registration email is sent to the Sheet for tracking
 - **Open source**: Review all code in this repository
 
 ## Technical Details
@@ -223,12 +321,17 @@ For 100+ events:
 ```
 luma-auto-register/
 ├── manifest.json           # Extension configuration
-├── background.js          # Service worker (queue manager)
-├── content.js            # Runs on Luma pages
+├── background.js           # Service worker (queue manager, API integration)
+├── content.js              # Runs on Luma pages
+├── settings.html           # Settings page for email/API configuration
+├── settings.js             # Settings page logic
+├── dashboard.html          # Registration dashboard UI
+├── dashboard.js            # Dashboard logic
+├── google-apps-script.js   # Google Apps Script code (copy to your Sheet)
 ├── popup/
-│   ├── popup.html        # Extension UI
-│   ├── popup.css         # Styles
-│   └── popup.js          # UI logic
+│   ├── popup.html          # Extension popup UI
+│   ├── popup.css           # Styles
+│   └── popup.js            # Popup logic
 └── icons/
     ├── icon16.png
     ├── icon48.png
@@ -268,6 +371,16 @@ Key areas to customize:
 
 ## Changelog
 
+### Version 2.0.0 (Team Edition)
+- **Google Sheets Database**: Shared tracking across team members
+- **Multi-Person Support**: Track registrations per email address
+- **Per-Calendar Tabs**: Auto-organize by calendar/conference (CHK2026, ethdenver, etc.)
+- **Master Tab**: Overview of all registrations across all calendars
+- **Relative Date Parsing**: Handles "Tomorrow", "Today", "Saturday" etc.
+- **Migration Tools**: Import existing registration data from old formats
+- **Settings Page**: Configure email, name, and API URL
+- **Improved Detection**: Better matching using event URL + email (case-insensitive)
+
 ### Version 1.0.0 (Initial Release)
 - Event discovery from calendar pages
 - Bulk registration with parallel processing
@@ -303,6 +416,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Last Updated:** January 9, 2026
+**Last Updated:** February 6, 2026
 
 Made with ❤️ for busy event-goers
