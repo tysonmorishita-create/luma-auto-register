@@ -34,12 +34,14 @@ class DashboardController {
     this.resultsList = document.getElementById('resultsList');
     this.refreshBtn = document.getElementById('refreshBtn');
     this.exportBtn = document.getElementById('exportBtn');
+    this.exportDebugBtn = document.getElementById('exportDebugBtn');
     this.stopBtn = document.getElementById('stopBtn');
   }
 
   attachEventListeners() {
     this.refreshBtn.addEventListener('click', () => this.loadState());
     this.exportBtn.addEventListener('click', () => this.exportResults());
+    this.exportDebugBtn.addEventListener('click', () => this.exportDebugLogs());
     this.stopBtn.addEventListener('click', () => this.stopRegistration());
   }
 
@@ -188,10 +190,13 @@ class DashboardController {
         tabLink = `<button class="tab-link-btn" data-url="${result.url}" title="Open event in a new tab">🔗 View Event</button>`;
       }
       
+      // Add date prefix if available
+      const datePrefix = result.date ? `<span style="color: #6366f1; font-weight: 600; margin-right: 8px;">[${result.date}]</span>` : '';
+      
       return `
         <div class="result-item ${result.status}">
           <div class="result-title">
-            ${result.title}
+            ${datePrefix}${result.title}
           </div>
           <div class="result-actions">
             <span class="result-status ${result.status}">
@@ -248,8 +253,9 @@ class DashboardController {
     }
 
     const csv = [
-      ['Title', 'URL', 'Status', 'Message', 'Timestamp'].join(','),
+      ['Date', 'Title', 'URL', 'Status', 'Message', 'Timestamp'].join(','),
       ...this.results.map(r => [
+        `"${r.date || ''}"`,
         `"${r.title}"`,
         r.url,
         r.status,
@@ -269,6 +275,31 @@ class DashboardController {
 
   stopRegistration() {
     chrome.runtime.sendMessage({ type: 'STOP_REGISTRATION' });
+  }
+
+  async exportDebugLogs() {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'EXPORT_DEBUG_LOGS' });
+      
+      if (response && response.success) {
+        const report = response.report;
+        const jsonString = JSON.stringify(report, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `luma-debug-report-${Date.now()}.json`;
+        a.click();
+        
+        URL.revokeObjectURL(url);
+        alert('Debug report exported successfully!');
+      } else {
+        alert(`Failed to export debug report: ${response?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      alert(`Export failed: ${error.message}`);
+    }
   }
 
   async saveState() {

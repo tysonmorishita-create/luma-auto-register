@@ -4,7 +4,15 @@ class PopupController {
     this.events = [];
     this.filteredEvents = [];
     this.searchQuery = '';
+    this.dateFilter = ''; // Selected date filter
+    this.availableDates = []; // List of unique dates
     this.state = 'idle'; // idle, scanning, ready, processing, paused, complete
+    this.showRegistered = true; // Toggle for showing registered events
+    this.registeredAtBottom = false; // Toggle for moving registered events to bottom
+    this.newCount = 0;
+    this.registeredCount = 0;
+    this.trulyNewCount = 0; // Events never seen before (Google Sheets only)
+    this.availableCount = 0; // Events available to register
     this.init();
   }
 
@@ -33,6 +41,10 @@ class PopupController {
     this.resetBtn = document.getElementById('resetBtn');
     this.toggleDebugBtn = document.getElementById('toggleDebugBtn');
     this.clearDebugBtn = document.getElementById('clearDebugBtn');
+    this.exportDebugBtn = document.getElementById('exportDebugBtn');
+    this.exportDebugBtnMain = document.getElementById('exportDebugBtnMain');
+    this.toggleRegisteredBtn = document.getElementById('toggleRegisteredBtn');
+    this.moveToBottomBtn = document.getElementById('moveToBottomBtn');
 
     // Sections
     this.eventsSection = document.getElementById('eventsSection');
@@ -40,6 +52,7 @@ class PopupController {
     this.progressSection = document.getElementById('progressSection');
     this.resultsSection = document.getElementById('resultsSection');
     this.debugSection = document.getElementById('debugSection');
+    this.eventsSummary = document.getElementById('eventsSummary');
 
     // Display elements
     this.scanStatus = document.getElementById('scanStatus');
@@ -47,7 +60,9 @@ class PopupController {
     this.eventCount = document.getElementById('eventCount');
     this.eventsList = document.getElementById('eventsList');
     this.eventSearch = document.getElementById('eventSearch');
+    this.dateFilterSelect = document.getElementById('dateFilter');
     this.searchCount = document.getElementById('searchCount');
+    this.summaryText = document.getElementById('summaryText');
     this.progressFill = document.getElementById('progressFill');
     this.progressText = document.getElementById('progressText');
     this.successCount = document.getElementById('successCount');
@@ -66,6 +81,9 @@ class PopupController {
     if (this.eventSearch) {
       this.eventSearch.addEventListener('input', (e) => this.handleSearch(e.target.value));
     }
+    if (this.dateFilterSelect) {
+      this.dateFilterSelect.addEventListener('change', (e) => this.handleDateFilter(e.target.value));
+    }
     this.startBtn.addEventListener('click', () => this.handleStart());
     this.pauseBtn.addEventListener('click', () => this.handlePause());
     this.stopBtn.addEventListener('click', () => this.handleStop());
@@ -73,6 +91,18 @@ class PopupController {
     this.resetBtn.addEventListener('click', () => this.handleReset());
     this.toggleDebugBtn.addEventListener('click', () => this.toggleDebug());
     this.clearDebugBtn.addEventListener('click', () => this.clearDebug());
+    if (this.exportDebugBtn) {
+      this.exportDebugBtn.addEventListener('click', () => this.exportDebugLogs());
+    }
+    if (this.exportDebugBtnMain) {
+      this.exportDebugBtnMain.addEventListener('click', () => this.exportDebugLogs());
+    }
+    if (this.toggleRegisteredBtn) {
+      this.toggleRegisteredBtn.addEventListener('click', () => this.toggleRegisteredEvents());
+    }
+    if (this.moveToBottomBtn) {
+      this.moveToBottomBtn.addEventListener('click', () => this.toggleRegisteredAtBottom());
+    }
   }
 
   async loadState() {
@@ -95,7 +125,7 @@ class PopupController {
       } else if (message.type === 'LOG') {
         this.addLog(message.level, message.message);
       } else if (message.type === 'SCAN_COMPLETE') {
-        this.handleScanComplete(message.events, message.debug);
+        this.handleScanComplete(message.events, message.debug, message.newCount, message.registeredCount);
       }
     });
   }
@@ -109,10 +139,13 @@ class PopupController {
       return;
     }
 
-    // Check if it's a Luma page
-    if (!tab.url.includes('luma.com') && !tab.url.includes('lu.ma')) {
-      this.showStatus('Please navigate to a Luma calendar page first', 'error');
-      this.addLog('error', 'Not on a Luma page');
+    // Check if it's a supported event platform page
+    const isSupportedPlatform = tab.url.includes('luma.com') || 
+                                 tab.url.includes('lu.ma') || 
+                                 tab.url.includes('lemonade.social');
+    if (!isSupportedPlatform) {
+      this.showStatus('Please navigate to a Luma or Lemonade calendar page first', 'error');
+      this.addLog('error', 'Not on a supported event platform page');
       return;
     }
 
@@ -145,8 +178,12 @@ class PopupController {
     });
   }
 
-  handleScanComplete(events, debugInfo) {
+  handleScanComplete(events, debugInfo, newCount, registeredCount) {
     this.events = events;
+    this.newCount = newCount || events.filter(e => !e.isRegistered).length;
+    this.registeredCount = registeredCount || events.filter(e => e.isRegistered).length;
+    this.trulyNewCount = events.filter(e => e.isNew).length; // Events never seen before (Google Sheets only)
+    this.availableCount = events.filter(e => !e.isRegistered).length; // Events available to register
     this.state = 'ready';
     this.scanBtn.disabled = false;
     
@@ -163,11 +200,82 @@ class PopupController {
       return;
     }
 
-    this.showStatus(`Found ${events.length} events!`, 'success');
-    this.addLog('success', `Found ${events.length} events`);
+    // Populate date filter dropdown
+    this.populateDateFilter();
+
+    // Update summary
+    this.updateEventsSummary();
+
+    // Build status message based on what data we have
+    let statusMsg;
+    if (this.trulyNewCount > 0) {
+      // Google Sheets is active - show truly new events
+      statusMsg = `Found ${this.trulyNewCount} NEW events`;
+      if (this.availableCount > this.trulyNewCount) {
+        statusMsg += `, ${this.availableCount - this.trulyNewCount} available`;
+      }
+      if (this.registeredCount > 0) {
+        statusMsg += `, ${this.registeredCount} already registered`;
+      }
+    } else if (this.registeredCount > 0) {
+      statusMsg = `Found ${this.availableCount} new events, ${this.registeredCount} already registered`;
+    } else {
+      statusMsg = `Found ${events.length} events`;
+    }
+    statusMsg += '!';
+    
+    this.showStatus(statusMsg, 'success');
+    this.addLog('success', statusMsg);
     this.renderEvents();
     this.eventsSection.style.display = 'block';
     this.settingsSection.style.display = 'block';
+  }
+
+  populateDateFilter() {
+    if (!this.dateFilterSelect) return;
+    
+    // Extract unique dates from events and sort them
+    const dates = new Set();
+    this.events.forEach(event => {
+      if (event.date) {
+        dates.add(event.date);
+      }
+    });
+    
+    // Convert to array and sort chronologically
+    this.availableDates = Array.from(dates).sort((a, b) => {
+      // Parse dates like "Feb 13" to compare them
+      const parseDate = (dateStr) => {
+        const months = { 'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5, 
+                        'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11 };
+        const match = dateStr.match(/([A-Za-z]+)\s*(\d+)/);
+        if (match) {
+          const month = months[match[1]] || 0;
+          const day = parseInt(match[2]) || 1;
+          return new Date(2026, month, day); // Use a fixed year for comparison
+        }
+        return new Date(0);
+      };
+      return parseDate(a) - parseDate(b);
+    });
+    
+    // Clear and populate dropdown
+    this.dateFilterSelect.innerHTML = '<option value="">📅 All Dates</option>';
+    this.availableDates.forEach(date => {
+      const option = document.createElement('option');
+      option.value = date;
+      option.textContent = date;
+      // Count events for this date
+      const count = this.events.filter(e => e.date === date).length;
+      option.textContent = `${date} (${count})`;
+      this.dateFilterSelect.appendChild(option);
+    });
+  }
+
+  handleDateFilter(date) {
+    this.dateFilter = date;
+    this.filterEvents();
+    this.renderEvents();
   }
 
   handleSearch(query) {
@@ -177,33 +285,81 @@ class PopupController {
   }
 
   filterEvents() {
-    if (!this.searchQuery) {
-      this.filteredEvents = this.events;
-    } else {
-      this.filteredEvents = this.events.filter(event => 
+    let filtered = this.events;
+    
+    // Filter by search query
+    if (this.searchQuery) {
+      filtered = filtered.filter(event => 
         event.title.toLowerCase().includes(this.searchQuery) ||
-        (event.url && event.url.toLowerCase().includes(this.searchQuery))
+        (event.url && event.url.toLowerCase().includes(this.searchQuery)) ||
+        (event.date && event.date.toLowerCase().includes(this.searchQuery))
       );
     }
+    
+    // Filter by date
+    if (this.dateFilter) {
+      filtered = filtered.filter(event => event.date === this.dateFilter);
+    }
+    
+    this.filteredEvents = filtered;
   }
 
   renderEvents() {
-    // Update filtered events if search query exists
-    if (this.searchQuery) {
-      this.filterEvents();
-    } else {
-      this.filteredEvents = this.events;
+    // Always filter events (handles both search and date filter)
+    this.filterEvents();
+
+    // Sort by date, optionally with registered events at bottom
+    let sortedEvents = [...this.filteredEvents].sort((a, b) => {
+      // Parse dates for sorting
+      const parseDate = (dateStr) => {
+        if (!dateStr) return new Date(9999, 11, 31); // Put events without dates at the end
+        const months = { 'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5, 
+                        'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11 };
+        const match = dateStr.match(/([A-Za-z]+)\s*(\d+)/);
+        if (match) {
+          const month = months[match[1]] || 0;
+          const day = parseInt(match[2]) || 1;
+          return new Date(2026, month, day);
+        }
+        return new Date(9999, 11, 31);
+      };
+      
+      // If "registered at bottom" is enabled, sort registered events to the end first
+      if (this.registeredAtBottom) {
+        if (a.isRegistered !== b.isRegistered) {
+          return a.isRegistered ? 1 : -1;
+        }
+      }
+      
+      // Then sort by date
+      const dateA = parseDate(a.date);
+      const dateB = parseDate(b.date);
+      if (dateA.getTime() !== dateB.getTime()) {
+        return dateA - dateB;
+      }
+      
+      return 0;
+    });
+
+    // Filter out registered events if toggle is off
+    if (!this.showRegistered) {
+      sortedEvents = sortedEvents.filter(e => !e.isRegistered);
     }
 
     const totalCount = this.events.length;
-    const filteredCount = this.filteredEvents.length;
+    const displayedCount = sortedEvents.length;
     
     this.eventCount.textContent = `${totalCount} events found`;
     
-    // Update search count
+    // Update search/filter count
     if (this.searchCount) {
-      if (this.searchQuery && filteredCount !== totalCount) {
-        this.searchCount.textContent = `Showing ${filteredCount} of ${totalCount}`;
+      const hasFilters = this.searchQuery || this.dateFilter || (!this.showRegistered && this.registeredCount > 0);
+      if (hasFilters && displayedCount !== totalCount) {
+        let filterText = `Showing ${displayedCount} of ${totalCount}`;
+        if (this.dateFilter) {
+          filterText += ` • ${this.dateFilter}`;
+        }
+        this.searchCount.textContent = filterText;
         this.searchCount.style.display = 'block';
       } else {
         this.searchCount.textContent = '';
@@ -213,22 +369,40 @@ class PopupController {
 
     this.eventsList.innerHTML = '';
 
-    if (this.filteredEvents.length === 0 && this.searchQuery) {
+    if (sortedEvents.length === 0) {
       const noResults = document.createElement('div');
       noResults.className = 'no-results';
-      noResults.textContent = `No events found matching "${this.searchQuery}"`;
+      let message = 'No events to display';
+      if (this.searchQuery && this.dateFilter) {
+        message = `No events matching "${this.searchQuery}" on ${this.dateFilter}`;
+      } else if (this.searchQuery) {
+        message = `No events found matching "${this.searchQuery}"`;
+      } else if (this.dateFilter) {
+        message = `No events on ${this.dateFilter}`;
+      }
+      noResults.textContent = message;
       this.eventsList.appendChild(noResults);
       return;
     }
 
-    // Render filtered events, but use original index for checkbox IDs
-    this.filteredEvents.forEach((event) => {
+    // Render sorted/filtered events
+    sortedEvents.forEach((event) => {
       const originalIndex = this.events.indexOf(event);
       const item = document.createElement('div');
-      item.className = 'event-item';
+      let itemClass = 'event-item';
+      if (event.isRegistered) itemClass += ' registered';
+      if (event.isNew) itemClass += ' new-event';
+      item.className = itemClass;
+      
+      // Build the display title with optional date prefix
+      const datePrefix = event.date ? `<span class="event-date">[${event.date}]</span>` : '';
+      const registeredBadge = event.isRegistered ? '<span class="registered-badge">✓ Registered</span>' : '';
+      const newBadge = event.isNew && !event.isRegistered ? '<span class="new-badge">🆕 NEW</span>' : '';
+      
       item.innerHTML = `
         <input type="checkbox" id="event-${originalIndex}" ${event.selected ? 'checked' : ''}>
-        <label for="event-${originalIndex}" class="event-title" title="${event.title}">${event.title}</label>
+        <label for="event-${originalIndex}" class="event-title" title="${event.title}">${datePrefix}${event.title}</label>
+        ${newBadge}${registeredBadge}
       `;
       
       const checkbox = item.querySelector('input');
@@ -241,16 +415,100 @@ class PopupController {
   }
 
   selectAll(selected) {
-    // Only select/deselect filtered events if search is active
-    if (this.searchQuery && this.filteredEvents.length > 0) {
-      this.filteredEvents.forEach(event => event.selected = selected);
+    // Only select/deselect filtered events if any filter is active
+    if ((this.searchQuery || this.dateFilter) && this.filteredEvents.length > 0) {
+      this.filteredEvents.forEach(event => {
+        if (!event.isRegistered) { // Don't select already registered events
+          event.selected = selected;
+        }
+      });
     } else {
-      this.events.forEach(event => event.selected = selected);
+      this.events.forEach(event => {
+        if (!event.isRegistered) { // Don't select already registered events
+          event.selected = selected;
+        }
+      });
+    }
+    this.renderEvents();
+  }
+
+  updateEventsSummary() {
+    if (!this.eventsSummary) return;
+    
+    const hasNewEvents = this.trulyNewCount > 0 || this.availableCount > 0;
+    
+    if (this.registeredCount > 0 || this.trulyNewCount > 0) {
+      this.eventsSummary.style.display = 'flex';
+      
+      if (this.trulyNewCount > 0) {
+        // Google Sheets mode - show truly new events
+        let summaryParts = [`🆕 ${this.trulyNewCount} NEW`];
+        if (this.availableCount > this.trulyNewCount) {
+          summaryParts.push(`${this.availableCount - this.trulyNewCount} available`);
+        }
+        if (this.registeredCount > 0) {
+          summaryParts.push(`✓ ${this.registeredCount} registered`);
+        }
+        this.summaryText.textContent = summaryParts.join(', ');
+        this.summaryText.className = 'summary-text';
+        this.eventsSummary.className = 'events-summary has-new';
+      } else if (this.availableCount > 0) {
+        this.summaryText.textContent = `🆕 ${this.availableCount} new events, ✓ ${this.registeredCount} already registered`;
+        this.summaryText.className = 'summary-text';
+        this.eventsSummary.className = 'events-summary has-new';
+      } else {
+        this.summaryText.textContent = `✓ All ${this.registeredCount} events already registered`;
+        this.summaryText.className = 'summary-text all-registered';
+        this.eventsSummary.className = 'events-summary all-registered';
+      }
+      
+      // Update toggle button text
+      if (this.toggleRegisteredBtn) {
+        this.toggleRegisteredBtn.textContent = this.showRegistered ? 'Hide Registered' : 'Show Registered';
+        this.toggleRegisteredBtn.className = this.showRegistered ? 'toggle-registered-btn active' : 'toggle-registered-btn';
+      }
+    } else {
+      this.eventsSummary.style.display = 'none';
+    }
+  }
+
+  toggleRegisteredEvents() {
+    this.showRegistered = !this.showRegistered;
+    this.updateEventsSummary();
+    this.renderEvents();
+  }
+
+  toggleRegisteredAtBottom() {
+    this.registeredAtBottom = !this.registeredAtBottom;
+    // Update button appearance
+    if (this.moveToBottomBtn) {
+      if (this.registeredAtBottom) {
+        this.moveToBottomBtn.textContent = '↑ Mixed Order';
+        this.moveToBottomBtn.title = 'Show registered events in date order';
+      } else {
+        this.moveToBottomBtn.textContent = '↓ Move to Bottom';
+        this.moveToBottomBtn.title = 'Move registered events to the bottom';
+      }
     }
     this.renderEvents();
   }
 
   async handleStart() {
+    // Check if required settings are configured
+    const userSettingsResult = await chrome.storage.local.get('userSettings');
+    const userSettings = userSettingsResult.userSettings || {};
+    
+    if (!userSettings.firstName || !userSettings.lastName || !userSettings.email) {
+      const missing = [];
+      if (!userSettings.firstName) missing.push('First Name');
+      if (!userSettings.lastName) missing.push('Last Name');
+      if (!userSettings.email) missing.push('Email');
+      
+      this.showStatus(`⚠️ Missing required settings: ${missing.join(', ')}. Please click the ⚙️ button to configure.`, 'error');
+      this.addLog('error', `Cannot start: Missing ${missing.join(', ')} in settings`);
+      return;
+    }
+    
     const selectedEvents = this.events.filter(e => e.selected);
     
     if (selectedEvents.length === 0) {
@@ -479,6 +737,33 @@ class PopupController {
   clearDebug() {
     this.debugContainer.innerHTML = '';
     this.addLog('info', 'Debug console cleared');
+  }
+
+  async exportDebugLogs() {
+    this.addLog('info', 'Generating debug report...');
+    
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'EXPORT_DEBUG_LOGS' });
+      
+      if (response && response.success) {
+        const report = response.report;
+        const jsonString = JSON.stringify(report, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `luma-debug-report-${Date.now()}.json`;
+        a.click();
+        
+        URL.revokeObjectURL(url);
+        this.addLog('success', 'Debug report exported successfully');
+      } else {
+        this.addLog('error', `Failed to export: ${response?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      this.addLog('error', `Export failed: ${error.message}`);
+    }
   }
 }
 

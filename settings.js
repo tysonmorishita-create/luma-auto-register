@@ -42,7 +42,12 @@ class SettingsController {
       // Options
       autoAcceptTerms: true,
       skipManualFields: false,
-      autoSelectFirstOption: true  // Speed mode: auto-select first dropdown option when no match
+      autoSelectFirstOption: true,  // Speed mode: auto-select first dropdown option when no match
+      // Speed Settings
+      speedMode: 'balanced',  // turbo, balanced, safe
+      adaptiveSpeed: true,    // Auto-slow when rate limits detected
+      // Integration Settings
+      googleSheetsApiUrl: ''  // Google Sheets API URL for multi-person tracking
     };
     
     this.init();
@@ -215,6 +220,11 @@ class SettingsController {
     this.autoAcceptTerms = document.getElementById('autoAcceptTerms');
     this.skipManualFields = document.getElementById('skipManualFields');
     this.autoSelectFirstOption = document.getElementById('autoSelectFirstOption');
+    // Speed Settings
+    this.speedMode = document.getElementById('speedMode');
+    this.adaptiveSpeed = document.getElementById('adaptiveSpeed');
+    // Integration Settings
+    this.googleSheetsApiUrl = document.getElementById('googleSheetsApiUrl');
     
     this.saveBtn = document.getElementById('saveBtn');
     this.resetBtn = document.getElementById('resetBtn');
@@ -312,6 +322,11 @@ class SettingsController {
     this.autoAcceptTerms.checked = settings.autoAcceptTerms !== false;
     this.skipManualFields.checked = settings.skipManualFields || false;
     if (this.autoSelectFirstOption) this.autoSelectFirstOption.checked = settings.autoSelectFirstOption !== false; // Default true
+    // Speed Settings
+    if (this.speedMode) this.speedMode.value = settings.speedMode || 'balanced';
+    if (this.adaptiveSpeed) this.adaptiveSpeed.checked = settings.adaptiveSpeed !== false; // Default true
+    // Integration Settings
+    if (this.googleSheetsApiUrl) this.googleSheetsApiUrl.value = settings.googleSheetsApiUrl || '';
   }
 
   async saveSettings() {
@@ -378,7 +393,12 @@ class SettingsController {
       // Options
       autoAcceptTerms: this.autoAcceptTerms.checked,
       skipManualFields: this.skipManualFields.checked,
-      autoSelectFirstOption: this.autoSelectFirstOption ? this.autoSelectFirstOption.checked : true
+      autoSelectFirstOption: this.autoSelectFirstOption ? this.autoSelectFirstOption.checked : true,
+      // Speed Settings
+      speedMode: this.speedMode ? this.speedMode.value : 'balanced',
+      adaptiveSpeed: this.adaptiveSpeed ? this.adaptiveSpeed.checked : true,
+      // Integration Settings
+      googleSheetsApiUrl: this.googleSheetsApiUrl ? this.googleSheetsApiUrl.value.trim() : ''
     };
 
     await chrome.storage.local.set({ userSettings: settings });

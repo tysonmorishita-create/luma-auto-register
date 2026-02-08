@@ -167,9 +167,37 @@ h3 {
   border-bottom: 1px solid #e5e7eb;
 }
 
+.filter-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .search-container {
-  margin-bottom: 12px;
+  flex: 1;
   position: relative;
+}
+
+.date-filter {
+  width: 120px;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  background: white;
+  cursor: pointer;
+  color: #374151;
+  transition: all 0.2s;
+}
+
+.date-filter:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.date-filter option {
+  padding: 8px;
 }
 
 .search-input {
@@ -251,6 +279,116 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.event-date {
+  font-weight: 600;
+  color: #6366f1;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
+.event-item.registered {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+  opacity: 0.8;
+}
+
+.event-item.registered .event-title {
+  color: #64748b;
+}
+
+.registered-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #0284c7;
+  background: #e0f2fe;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.new-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #059669;
+  background: #d1fae5;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.event-item.new-event {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.event-item.new-event .event-title {
+  color: #166534;
+  font-weight: 500;
+}
+
+.events-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%);
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.summary-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.events-summary.has-new {
+  background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%);
+  border-color: #bbf7d0;
+}
+
+.events-summary.all-registered {
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  border-color: #bae6fd;
+}
+
+.summary-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #166534;
+}
+
+.summary-text.all-registered {
+  color: #0369a1;
+}
+
+.toggle-registered-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6b7280;
+  background: white;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.toggle-registered-btn:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.toggle-registered-btn.active {
+  background: #e0f2fe;
+  border-color: #0284c7;
+  color: #0284c7;
 }
 
 .settings-grid {

@@ -779,6 +779,36 @@
       </div>
 
       <div class="section">
+        <h2>🚀 Registration Speed</h2>
+        <p>Control how fast the extension registers for events (affects rate limiting)</p>
+
+        <div class="form-group">
+          <label for="speedMode">
+            Speed Mode
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Choose how aggressively the extension registers. Faster modes may trigger rate limits on some calendars. Safe mode is recommended for large batches.</span>
+            </span>
+          </label>
+          <select id="speedMode">
+            <option value="turbo">🚀 Turbo - Fastest (1.5-3s delays, no breaks)</option>
+            <option value="balanced" selected>⚖️ Balanced - Recommended (4-8s delays, short breaks)</option>
+            <option value="safe">🐢 Safe - Most reliable (10-16s delays, longer breaks)</option>
+          </select>
+          <div class="help-text" style="margin-top: 10px;">
+            <strong>🚀 Turbo:</strong> ~2 min for 50 events. May trigger rate limits.<br>
+            <strong>⚖️ Balanced:</strong> ~6 min for 50 events. Good balance of speed and reliability.<br>
+            <strong>🐢 Safe:</strong> ~14 min for 50 events. Best for large batches or strict sites.
+          </div>
+        </div>
+
+        <div class="checkbox-group" style="margin-top: 15px;">
+          <input type="checkbox" id="adaptiveSpeed" checked>
+          <label for="adaptiveSpeed" style="margin: 0;">🧠 Adaptive Speed: Auto-slow when rate limits detected</label>
+        </div>
+        <div class="help-text">When enabled, the extension will automatically slow down if it detects rate limiting, then speed back up after successful registrations.</div>
+      </div>
+
+      <div class="section">
         <h2>Automatic Registration Options</h2>
         <p>Control how the extension handles different scenarios</p>
 
@@ -800,6 +830,26 @@
         <div class="help-text">
           <strong>✅ Checked (Speed Mode):</strong> Dropdowns without a matching setting will auto-select the first option. Best for bulk registrations.<br>
           <strong>⬜ Unchecked (Safe Mode):</strong> Dropdowns without a match will be SKIPPED. Best for sensitive events where you want to manually review.
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Integration Settings</h2>
+        <p>Configure external integrations for tracking registrations across multiple people</p>
+
+        <div class="form-group">
+          <label for="googleSheetsApiUrl">
+            Google Sheets API URL
+            <span class="tooltip-icon">ℹ️
+              <span class="tooltip-text">Connect to a Google Sheets backend to track registrations per person. This allows multiple people to use the extension with accurate "already registered" detection. Leave blank to use local-only tracking.</span>
+            </span>
+          </label>
+          <input type="url" id="googleSheetsApiUrl" placeholder="https://script.google.com/macros/s/.../exec">
+          <div class="help-text">
+            <strong>How to set up:</strong> Create a Google Sheet, add the Apps Script from the documentation, deploy as web app, and paste the URL here.<br>
+            <strong>Example:</strong> https://script.google.com/macros/s/AKfycb.../exec
+          </div>
+          <span class="field-status" id="googleSheetsApiUrlStatus"></span>
         </div>
       </div>
     </div>

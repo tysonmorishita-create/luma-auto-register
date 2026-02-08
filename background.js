@@ -1,6 +1,298 @@
 // Background Service Worker
 console.log('[Background] Background script loading...');
 
+// Debug Logger - Persistent logging for troubleshooting
+class DebugLogger {
+  constructor() {
+    this.maxLogs = 500; // Rolling buffer size
+    this.storageKey = 'debugLogs';
+  }
+
+  async log(level, message, context = {}) {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      level: level,
+      message: message,
+      context: context
+    };
+
+    // Add stack trace for errors
+    if (level === 'error') {
+      logEntry.stack = new Error().stack;
+    }
+
+    try {
+      const result = await chrome.storage.local.get([this.storageKey]);
+      let logs = result[this.storageKey] || [];
+      
+      // Add new log entry
+      logs.push(logEntry);
+      
+      // Prune old entries if exceeding max
+      if (logs.length > this.maxLogs) {
+        logs = logs.slice(logs.length - this.maxLogs);
+      }
+      
+      await chrome.storage.local.set({ [this.storageKey]: logs });
+    } catch (error) {
+      console.error('[DebugLogger] Failed to store log:', error);
+    }
+  }
+
+  async getLogs() {
+    try {
+      const result = await chrome.storage.local.get([this.storageKey]);
+      return result[this.storageKey] || [];
+    } catch (error) {
+      console.error('[DebugLogger] Failed to retrieve logs:', error);
+      return [];
+    }
+  }
+
+  async clearLogs() {
+    try {
+      await chrome.storage.local.remove(this.storageKey);
+    } catch (error) {
+      console.error('[DebugLogger] Failed to clear logs:', error);
+    }
+  }
+
+  async exportDebugReport() {
+    try {
+      // Gather all debug information
+      const [
+        logs,
+        storageData,
+        manifest
+      ] = await Promise.all([
+        this.getLogs(),
+        chrome.storage.local.get(['userSettings', 'results', 'stats', 'registeredEvents', 'processingState']),
+        chrome.runtime.getManifest()
+      ]);
+
+      // Get browser info
+      const browserInfo = {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language
+      };
+
+      const report = {
+        exportedAt: new Date().toISOString(),
+        extensionVersion: manifest.version,
+        extensionName: manifest.name,
+        browser: browserInfo,
+        settings: storageData.userSettings || {},
+        stats: storageData.stats || {},
+        processingState: storageData.processingState || 'idle',
+        recentResults: (storageData.results || []).slice(-50), // Last 50 results
+        registeredEventsCount: Object.keys(storageData.registeredEvents || {}).length,
+        logs: logs
+      };
+
+      return report;
+    } catch (error) {
+      console.error('[DebugLogger] Failed to export debug report:', error);
+      return {
+        exportedAt: new Date().toISOString(),
+        error: error.message,
+        logs: []
+      };
+    }
+  }
+}
+
+// Initialize global debug logger
+const debugLogger = new DebugLogger();
+
+// Google Sheets API Helper - For multi-person registration tracking
+class GoogleSheetsAPI {
+  constructor() {
+    this.apiUrl = null;
+    this.initialized = false;
+  }
+
+  async initialize() {
+    try {
+      const result = await chrome.storage.local.get('userSettings');
+      this.apiUrl = result.userSettings?.googleSheetsApiUrl || null;
+      this.initialized = true;
+      console.log('[GoogleSheetsAPI] Initialized, API URL:', this.apiUrl ? 'configured' : 'not configured');
+    } catch (error) {
+      console.error('[GoogleSheetsAPI] Failed to initialize:', error);
+      this.apiUrl = null;
+      this.initialized = true;
+    }
+  }
+
+  isConfigured() {
+    return !!this.apiUrl;
+  }
+
+  async ensureInitialized() {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+  }
+
+  // Refresh API URL from settings (call when settings might have changed)
+  async refresh() {
+    this.initialized = false;
+    await this.initialize();
+  }
+
+  // Get seen events and registrations for a specific email (optionally filtered by calendar)
+  async getScanStatus(email, calendar = null) {
+    await this.ensureInitialized();
+    
+    if (!this.isConfigured()) {
+      return { success: false, error: 'API not configured' };
+    }
+
+    if (!email) {
+      return { success: false, error: 'Email is required' };
+    }
+
+    try {
+      let url = `${this.apiUrl}?action=getScanStatus&email=${encodeURIComponent(email)}`;
+      if (calendar) {
+        url += `&calendar=${encodeURIComponent(calendar)}`;
+      }
+      console.log('[GoogleSheetsAPI] Fetching scan status for:', email, calendar ? `(calendar: ${calendar})` : '(all calendars)');
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('[GoogleSheetsAPI] Scan status received:', {
+        seenEvents: data.seenEvents?.length || 0,
+        myRegistrations: data.myRegistrations?.length || 0
+      });
+      
+      return {
+        success: true,
+        seenEvents: data.seenEvents || [],
+        myRegistrations: data.myRegistrations || []
+      };
+    } catch (error) {
+      console.error('[GoogleSheetsAPI] getScanStatus failed:', error);
+      debugLogger.log('error', 'Google Sheets API getScanStatus failed', { error: error.message });
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Add a registration (fire and forget - don't await in calling code)
+  async addRegistration(registration) {
+    await this.ensureInitialized();
+    
+    if (!this.isConfigured()) {
+      console.log('[GoogleSheetsAPI] Skipping addRegistration - API not configured');
+      return { success: false, error: 'API not configured' };
+    }
+
+    try {
+      const regData = {
+        event_url: registration.url || registration.event_url,
+        title: registration.title || '',
+        event_date: registration.date || registration.event_date || '',
+        person_email: registration.email || registration.person_email,
+        person_name: registration.name || registration.person_name || '',
+        calendar: registration.calendar || 'default'
+      };
+
+      const url = `${this.apiUrl}?action=addRegistration&registration=${encodeURIComponent(JSON.stringify(regData))}`;
+      console.log('[GoogleSheetsAPI] Saving registration:', regData.event_url, 'for', regData.person_email, 'to calendar:', regData.calendar);
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('[GoogleSheetsAPI] Registration saved:', data);
+      
+      return { success: true, added: data.added };
+    } catch (error) {
+      console.error('[GoogleSheetsAPI] addRegistration failed:', error);
+      debugLogger.log('error', 'Google Sheets API addRegistration failed', { 
+        error: error.message,
+        registration: registration.url || registration.event_url
+      });
+      return { success: false, error: error.message };
+    }
+  }
+}
+
+// Initialize global Google Sheets API helper
+const googleSheetsAPI = new GoogleSheetsAPI();
+
+// Helper function to extract calendar identifier from URL
+// Examples:
+// "https://lu.ma/CHK2026" -> "CHK2026"
+// "https://luma.com/calendar/consensus-hong-kong" -> "consensus-hong-kong"
+// "https://lemonade.social/s/ethdenver" -> "ethdenver"
+// "https://lu.ma/calendar/CHK2026?k=events" -> "CHK2026"
+function extractCalendarId(url) {
+  if (!url) return 'default';
+  
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
+    
+    // Handle different URL patterns
+    // Pattern: /calendar/[calendar-id]
+    const calendarMatch = pathname.match(/\/calendar\/([^/?#]+)/);
+    if (calendarMatch) {
+      return sanitizeSheetName(calendarMatch[1]);
+    }
+    
+    // Pattern: /s/[space-id] (Lemonade spaces)
+    const spaceMatch = pathname.match(/\/s\/([^/?#]+)/);
+    if (spaceMatch) {
+      return sanitizeSheetName(spaceMatch[1]);
+    }
+    
+    // Pattern: direct path like /CHK2026 (but not /e/ event pages)
+    const directMatch = pathname.match(/^\/([a-zA-Z0-9_-]+)$/);
+    if (directMatch && !pathname.startsWith('/e/') && !pathname.startsWith('/event/')) {
+      return sanitizeSheetName(directMatch[1]);
+    }
+    
+    // Fallback: use hostname + first path segment
+    const segments = pathname.split('/').filter(s => s.length > 0);
+    if (segments.length > 0) {
+      return sanitizeSheetName(segments[0]);
+    }
+    
+    return 'default';
+  } catch (e) {
+    console.error('[extractCalendarId] Failed to parse URL:', url, e);
+    return 'default';
+  }
+}
+
+// Sanitize string for use as a Google Sheet tab name
+// Sheet names have restrictions: max 100 chars, no special chars like :*?/\[]
+function sanitizeSheetName(name) {
+  if (!name) return 'default';
+  
+  return name
+    .replace(/[:\\*?\/\\\[\]]/g, '-')  // Replace invalid chars with dash
+    .replace(/^'+|'+$/g, '')            // Remove leading/trailing quotes
+    .substring(0, 100)                   // Max 100 characters
+    .trim() || 'default';
+}
+
 class RegistrationManager {
   constructor() {
     this.queue = [];
@@ -19,6 +311,32 @@ class RegistrationManager {
       pending: 0
     };
     this.targetWindowId = null; // Track which window to open tabs in for consistent window usage
+    
+    // Speed mode configurations
+    this.speedModes = {
+      turbo: {
+        minDelay: 1500,      // 1.5 seconds min
+        maxDelay: 3000,      // 3 seconds max
+        batchSize: 0,        // No batch breaks
+        batchBreak: 0
+      },
+      balanced: {
+        minDelay: 4000,      // 4 seconds min
+        maxDelay: 8000,      // 8 seconds max
+        batchSize: 10,       // Break every 10 registrations
+        batchBreak: 45000    // 45 second break
+      },
+      safe: {
+        minDelay: 10000,     // 10 seconds min
+        maxDelay: 16000,     // 16 seconds max
+        batchSize: 10,       // Break every 10 registrations
+        batchBreak: 90000    // 1.5 minute break
+      }
+    };
+    
+    // Adaptive speed tracking
+    this.consecutiveFailures = 0;
+    this.adaptiveDelayMultiplier = 1.0;
   }
 
   async init() {
@@ -32,12 +350,12 @@ class RegistrationManager {
       try {
         await chrome.windows.get(stored.targetWindowId);
         this.targetWindowId = stored.targetWindowId;
-        console.log('[Luma Auto Register] Restored target window ID: ' + this.targetWindowId);
+        console.log('[Event Auto Register] Restored target window ID: ' + this.targetWindowId);
       } catch (error) {
         // Window no longer exists, clear it
         this.targetWindowId = null;
         await chrome.storage.local.remove('targetWindowId');
-        console.log('[Luma Auto Register] Stored window ID no longer exists, cleared');
+        console.log('[Event Auto Register] Stored window ID no longer exists, cleared');
       }
     }
   }
@@ -73,6 +391,15 @@ class RegistrationManager {
         this.sendLog('error', `Tab error: ${error.message}`);
         throw error;
       }
+
+      // Detect platform from URL
+      const platform = this.detectPlatform(tab.url);
+      this.sendLog('info', `Detected platform: ${platform}`);
+      console.log('[Background] Platform detected:', platform);
+
+      // Extract calendar ID from URL for Google Sheets organization
+      const calendarId = extractCalendarId(tab.url);
+      console.log('[Background] Calendar ID extracted:', calendarId);
 
       // Wait a moment for page to be ready
       this.sendLog('info', 'Waiting for page to be ready...');
@@ -191,13 +518,14 @@ class RegistrationManager {
         }
       }
 
-      // Now perform gradual scrolling
+      // Now perform gradual scrolling with proper lazy-load detection
       let noProgressCount = 0;
-      const maxNoProgress = 3; // Stop if no progress for 3 consecutive scrolls
+      const maxNoProgress = 4; // Stop if no progress for 4 consecutive checks
 
-      for (let i = 0; i < 20; i++) {
-        console.log(`[Background] Scroll ${i + 1}/20 starting...`);
+      for (let i = 0; i < 25; i++) {
+        console.log(`[Background] Scroll ${i + 1}/25 starting...`);
         try {
+          // Step 1: Perform the scroll
           const scrollResult = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: () => {
@@ -206,11 +534,9 @@ class RegistrationManager {
                 document.documentElement.scrollHeight
               );
 
-              // Get previous scroll positions
               var previousWindowScroll = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
-              var previousContainerScrolls = [];
 
-              // Find scrollable containers again (they might have changed)
+              // Find scrollable containers
               var allElements = document.querySelectorAll('*');
               var containers = [];
 
@@ -221,17 +547,11 @@ class RegistrationManager {
 
                 if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
                   el.scrollHeight > el.clientHeight && el.scrollHeight > 100) {
-                  previousContainerScrolls.push({
-                    element: el,
-                    previousScroll: el.scrollTop,
-                    scrollHeight: el.scrollHeight,
-                    clientHeight: el.clientHeight
-                  });
                   containers.push(el);
                 }
               }
 
-              // Scroll window quickly (scroll down by 1.5x viewport height for faster scanning)
+              // Scroll window fast but with randomization
               var windowHeight = window.innerHeight || document.documentElement.clientHeight;
               var currentWindowScroll = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
               var maxWindowScroll = Math.max(
@@ -240,13 +560,14 @@ class RegistrationManager {
               ) - windowHeight;
 
               if (maxWindowScroll > 0) {
-                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * 1.5, maxWindowScroll);
-                window.scrollTo({ top: nextWindowScroll, behavior: 'smooth' }); // Smooth but fast scrolling
+                var scrollMultiplier = 5 + Math.random() * 3;
+                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * scrollMultiplier, maxWindowScroll);
+                window.scrollTo({ top: nextWindowScroll, behavior: 'auto' });
                 document.documentElement.scrollTop = nextWindowScroll;
                 document.body.scrollTop = nextWindowScroll;
               }
 
-              // Scroll containers quickly
+              // Scroll containers
               for (var c = 0; c < containers.length; c++) {
                 var container = containers[c];
                 var containerHeight = container.clientHeight;
@@ -254,36 +575,23 @@ class RegistrationManager {
                 var maxScroll = container.scrollHeight - containerHeight;
 
                 if (maxScroll > 0) {
-                  var nextScroll = Math.min(currentScroll + containerHeight * 1.5, maxScroll);
+                  var containerScrollMultiplier = 5 + Math.random() * 3;
+                  var nextScroll = Math.min(currentScroll + containerHeight * containerScrollMultiplier, maxScroll);
                   container.scrollTop = nextScroll;
                 }
               }
 
-              // Dispatch scroll events
+              // Dispatch scroll events to trigger lazy loading
               window.dispatchEvent(new Event('scroll', { bubbles: true }));
               document.dispatchEvent(new Event('scroll', { bubbles: true }));
               for (var c = 0; c < containers.length; c++) {
                 containers[c].dispatchEvent(new Event('scroll', { bubbles: true }));
               }
 
-              // Brief wait for content to load (reduced for speed)
-              var startTime = Date.now();
-              while (Date.now() - startTime < 100) {
-                // Busy wait for 100ms
-              }
-
-              // Check new content height
-              var newContentHeight = Math.max(
-                document.body.scrollHeight,
-                document.documentElement.scrollHeight
-              );
-
               var currentWindowScrollAfter = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
 
               return {
                 previousContentHeight: previousContentHeight,
-                newContentHeight: newContentHeight,
-                contentGrew: newContentHeight > previousContentHeight,
                 previousWindowScroll: previousWindowScroll,
                 currentWindowScroll: currentWindowScrollAfter,
                 maxWindowScroll: maxWindowScroll,
@@ -294,35 +602,101 @@ class RegistrationManager {
             }
           });
 
-          const result = scrollResult[0]?.result;
-          if (result) {
-            console.log(`[Background] Scroll ${i + 1}/20 result:`, result);
-            const progressMsg = result.contentGrew ? '✓ Content loaded' :
-              result.windowScrolled ? '→ Scrolled' : '⚠ No progress';
-            this.sendLog('info', `  Scroll ${i + 1}/20: ${progressMsg} (height: ${result.newContentHeight}, pos: ${Math.round(result.currentWindowScroll)})`);
+          const scrollData = scrollResult[0]?.result;
+          if (!scrollData) {
+            console.log(`[Background] Scroll ${i + 1}/25 complete (no result)`);
+            this.sendLog('info', `  Scroll ${i + 1}/25 complete`);
+            await this.sleep(1000);
+            continue;
+          }
 
-            // Check if we made progress
-            if (result.contentGrew || result.windowScrolled) {
+          // Step 2: Wait for lazy-loaded content (1.5 seconds for better detection)
+          await this.sleep(1500);
+
+          // Step 3: Check if content grew after waiting
+          const contentCheckResult = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (prevHeight) => {
+              var newContentHeight = Math.max(
+                document.body.scrollHeight,
+                document.documentElement.scrollHeight
+              );
+              
+              // Check for loading indicators on Luma pages
+              var isLoading = !!(
+                document.querySelector('[class*="loading"]') ||
+                document.querySelector('[class*="spinner"]') ||
+                document.querySelector('[class*="skeleton"]') ||
+                document.querySelector('[data-loading="true"]') ||
+                document.querySelector('[class*="Loading"]') ||
+                document.querySelector('.animate-pulse')
+              );
+              
+              return {
+                previousContentHeight: prevHeight,
+                newContentHeight: newContentHeight,
+                contentGrew: newContentHeight > prevHeight,
+                heightDiff: newContentHeight - prevHeight,
+                isLoading: isLoading
+              };
+            },
+            args: [scrollData.previousContentHeight]
+          });
+
+          const contentData = contentCheckResult[0]?.result;
+          
+          // Step 4: If still loading or content grew, wait more and check again
+          if (contentData && (contentData.isLoading || contentData.contentGrew)) {
+            this.sendLog('info', `  Scroll ${i + 1}/25: Content loading... waiting for more`);
+            await this.sleep(1000); // Extra wait for content to finish loading
+            
+            const finalCheckResult = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              func: (prevHeight) => {
+                return {
+                  newContentHeight: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+                  contentGrew: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) > prevHeight
+                };
+              },
+              args: [scrollData.previousContentHeight]
+            });
+            
+            const finalData = finalCheckResult[0]?.result;
+            const grewAfterWait = finalData?.contentGrew || contentData.contentGrew;
+            
+            console.log(`[Background] Scroll ${i + 1}/25 result: contentGrew=${grewAfterWait}, scrolled=${scrollData.windowScrolled}`);
+            const progressMsg = grewAfterWait ? '✓ Content loaded' :
+              scrollData.windowScrolled ? '→ Scrolled' : '⚠ No progress';
+            this.sendLog('info', `  Scroll ${i + 1}/25: ${progressMsg} (height: ${finalData?.newContentHeight || contentData.newContentHeight}, pos: ${Math.round(scrollData.currentWindowScroll)})`);
+
+            if (grewAfterWait || scrollData.windowScrolled) {
               noProgressCount = 0;
             } else {
               noProgressCount++;
             }
-
-            // Stop early if we've reached the bottom and no new content is loading
-            if (result.reachedBottom && !result.contentGrew && noProgressCount >= 2) {
-              this.sendLog('info', 'Reached bottom with no new content. Stopping scroll.');
-              break;
-            }
           } else {
-            console.log(`[Background] Scroll ${i + 1}/20 complete (no result)`);
-            this.sendLog('info', `  Scroll ${i + 1}/20 complete`);
+            console.log(`[Background] Scroll ${i + 1}/25 result: scrolled=${scrollData.windowScrolled}, reachedBottom=${scrollData.reachedBottom}`);
+            const progressMsg = scrollData.windowScrolled ? '→ Scrolled' : '⚠ No progress';
+            this.sendLog('info', `  Scroll ${i + 1}/25: ${progressMsg} (height: ${contentData?.newContentHeight || scrollData.previousContentHeight}, pos: ${Math.round(scrollData.currentWindowScroll)})`);
+
+            if (scrollData.windowScrolled) {
+              noProgressCount = 0;
+            } else {
+              noProgressCount++;
+            }
+          }
+
+          // Stop early if reached bottom and no new content after multiple tries
+          if (scrollData.reachedBottom && noProgressCount >= maxNoProgress) {
+            this.sendLog('info', `Reached bottom with no new content after ${maxNoProgress} checks. Stopping scroll.`);
+            break;
           }
         } catch (error) {
           console.error(`[Background] Scroll ${i + 1} error:`, error);
-          this.sendLog('warn', `  Scroll ${i + 1}/20 failed: ${error.message}`);
+          this.sendLog('warn', `  Scroll ${i + 1}/25 failed: ${error.message}`);
         }
 
-        await this.sleep(400); // Wait 400ms between scrolls for lazy loading (faster scanning)
+        await this.sleep(300); // Small delay between scroll iterations
       }
 
       // Scroll back to top
@@ -362,70 +736,94 @@ class RegistrationManager {
       this.sendLog('info', 'Waiting for content to load after scrolling...');
       await this.sleep(2000);
 
-      // Check for event links (use same logic as scraping)
-      this.sendLog('info', 'Looking for event links...');
+      // Check for event links (use same logic as scraping) - platform-aware
+      this.sendLog('info', `Looking for event links on ${platform} page...`);
       const checkLinks = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: function () {
+        args: [platform],
+        func: function (platform) {
           // Find all links - check both absolute and relative URLs
           const allLinks = document.querySelectorAll('a[href]');
-          console.log('[Luma Auto Register] Total links on page: ' + allLinks.length);
+          console.log('[Event Auto Register] Total links on page: ' + allLinks.length);
+          console.log('[Event Auto Register] Platform: ' + platform);
           let eventCount = 0;
-          let lumaLinks = 0;
+          let platformLinks = 0;
           const sampleLinks = [];
           const allSampleHrefs = [];
+          
+          // Define patterns based on platform
+          var eventPatterns = [];
+          var excludePatterns = [];
+          
+          if (platform === 'lemonade') {
+            // Lemonade event patterns - internal and external events
+            eventPatterns = [
+              /lemonade\.social\/(e|event)\//,
+              /lu\.ma\/[a-zA-Z0-9_-]+/,
+              /luma\.com\/[a-zA-Z0-9_-]+/
+            ];
+            excludePatterns = [
+              /lemonade\.social\/(s|space|profile|login|settings|discover)\//,
+              /lemonade\.social\/?$/,
+              /lu\.ma\/(calendar|profile|discover|create)\//,
+              /lu\.ma\/?$/
+            ];
+          } else {
+            // Luma event patterns
+            eventPatterns = [
+              /(?:lu\.ma|luma\.com)\/[a-zA-Z0-9_-]+/
+            ];
+            excludePatterns = [
+              /\/calendar/,
+              /\/profile/,
+              /\/settings/,
+              /\/about/,
+              /\/discover/,
+              /\/signin/,
+              /\/create/,
+              /\/login/,
+              /BP-SideEvents/,
+              /\?k=/,
+              /\/map/
+            ];
+          }
 
           for (let i = 0; i < allLinks.length; i++) {
             const link = allLinks[i];
-            // Use href property which resolves relative URLs to absolute
             const href = link.href || link.getAttribute('href') || '';
             const hrefAttr = link.getAttribute('href') || '';
             
-            // Check if it's a Luma link (absolute or relative)
-            const isLumaLink = href.includes('lu.ma') || href.includes('luma.com') || 
+            // Check if it's a relevant platform link
+            var isPlatformLink = false;
+            if (platform === 'lemonade') {
+              isPlatformLink = href.includes('lemonade.social') || href.includes('lu.ma') || href.includes('luma.com');
+            } else {
+              isPlatformLink = href.includes('lu.ma') || href.includes('luma.com') || 
                               (hrefAttr.startsWith('/') && !hrefAttr.startsWith('//'));
+            }
             
-            if (isLumaLink) {
-              lumaLinks++;
+            if (isPlatformLink) {
+              platformLinks++;
               if (allSampleHrefs.length < 10) {
                 allSampleHrefs.push({ href: href, hrefAttr: hrefAttr });
               }
               
-              // For relative URLs, check if they look like event paths
-              // For absolute URLs, use existing pattern
-              let isEventLink = false;
-              
-              if (href.includes('lu.ma') || href.includes('luma.com')) {
-                // Absolute URL - check pattern
-                if (href.match(/\/([a-zA-Z0-9_-]+)(?:\?|$|#)/) &&
-                  !href.includes('/calendar') &&
-                  !href.includes('/profile') &&
-                  !href.includes('BP-SideEvents') &&
-                  !href.includes('/settings') &&
-                  !href.includes('/about') &&
-                  !href.includes('/discover') &&
-                  !href.includes('/signin') &&
-                  !href.includes('/create') &&
-                  !href.includes('/login') &&
-                  !href.match(/luma\.com\/[a-zA-Z0-9_-]+\?k=/) &&
-                  !href.match(/luma\.com\/[a-zA-Z0-9_-]+\/map/) &&
-                  href !== 'https://lu.ma/' &&
-                  href !== 'https://luma.com/') {
+              // Check if it matches event patterns
+              var isEventLink = false;
+              for (var p = 0; p < eventPatterns.length; p++) {
+                if (eventPatterns[p].test(href)) {
                   isEventLink = true;
+                  break;
                 }
-              } else if (hrefAttr.startsWith('/') && hrefAttr.length > 1) {
-                // Relative URL - check if it looks like an event path
-                const pathMatch = hrefAttr.match(/^\/([a-zA-Z0-9_-]+)(?:\?|$|#)/);
-                if (pathMatch && 
-                  !hrefAttr.includes('/calendar') &&
-                  !hrefAttr.includes('/profile') &&
-                  !hrefAttr.includes('/settings') &&
-                  !hrefAttr.includes('/about') &&
-                  !hrefAttr.includes('/discover') &&
-                  !hrefAttr.includes('/signin') &&
-                  !hrefAttr.includes('/create') &&
-                  !hrefAttr.includes('/login')) {
-                  isEventLink = true;
+              }
+              
+              // Check if it should be excluded
+              if (isEventLink) {
+                for (var p = 0; p < excludePatterns.length; p++) {
+                  if (excludePatterns[p].test(href)) {
+                    isEventLink = false;
+                    break;
+                  }
                 }
               }
               
@@ -438,16 +836,16 @@ class RegistrationManager {
             }
           }
 
-          console.log('[Luma Auto Register] Luma links found: ' + lumaLinks + ', Event links: ' + eventCount);
+          console.log('[Event Auto Register] Platform links found: ' + platformLinks + ', Event links: ' + eventCount);
           if (allSampleHrefs.length > 0) {
-            console.log('[Luma Auto Register] Sample Luma hrefs:', allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5));
+            console.log('[Event Auto Register] Sample hrefs:', allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5));
           }
-          
+
           return {
             eventLinks: eventCount,
-            totalLinks: lumaLinks,
+            totalLinks: platformLinks,
             allLinks: allLinks.length,
-            // Also check for .event-link for backwards compatibility
+            // Also check for .event-link for Luma backwards compatibility
             eventLinkClass: document.querySelectorAll('a.event-link').length,
             sampleLinks: sampleLinks,
             allSampleHrefs: allSampleHrefs.slice(0, 10)
@@ -456,43 +854,562 @@ class RegistrationManager {
       });
 
       const result = checkLinks[0]?.result || { eventLinks: 0, totalLinks: 0 };
-      this.sendLog('info', `Found ${result.eventLinks} event links (${result.totalLinks} total Luma links, ${result.allLinks || 0} total links on page)`);
+      this.sendLog('info', `Found ${result.eventLinks} event links (${result.totalLinks} total platform links, ${result.allLinks || 0} total links on page)`);
       
       // Log sample links for debugging
       if (result.sampleLinks && result.sampleLinks.length > 0) {
         this.sendLog('info', `Sample event links: ${result.sampleLinks.map(l => l.href || l.hrefAttr).join(', ')}`);
       }
       if (result.allSampleHrefs && result.allSampleHrefs.length > 0) {
-        this.sendLog('info', `Sample Luma hrefs: ${result.allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5).join(', ')}`);
+        this.sendLog('info', `Sample hrefs: ${result.allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5).join(', ')}`);
       }
 
       if (result.eventLinks === 0) {
-        this.sendLog('error', 'No event links found. Make sure you\'re on a Luma calendar page.');
-        if (result.totalLinks === 0) {
-          this.sendLog('info', 'No Luma links detected at all. The page may use a different structure.');
-          if (result.allSampleHrefs && result.allSampleHrefs.length > 0) {
-            this.sendLog('info', `However, found these hrefs that might be Luma links: ${result.allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5).join(', ')}`);
+        // For Lemonade: don't block here - Lemonade uses React without anchor tags
+        // The scraper will use card-based detection instead
+        if (platform === 'lemonade') {
+          this.sendLog('info', 'No anchor links found - Lemonade uses React cards. Proceeding with card-based scraping...');
+          // Check if there are event cards present
+          const cardCheck = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            function: () => {
+              const cards = document.querySelectorAll('div[class*="rounded-md"][class*="border-card"], div[class*="card"][class*="bg-card"]');
+              const datePattern = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(at|@)\s+\d{1,2}:\d{2}/i;
+              let cardsWithDates = 0;
+              for (const card of cards) {
+                if (datePattern.test(card.textContent || '')) {
+                  cardsWithDates++;
+                }
+              }
+              return { totalCards: cards.length, cardsWithDates: cardsWithDates };
+            }
+          });
+          const cardResult = cardCheck[0]?.result || { totalCards: 0, cardsWithDates: 0 };
+          this.sendLog('info', `Found ${cardResult.cardsWithDates} event cards with dates (${cardResult.totalCards} total cards)`);
+          
+          if (cardResult.cardsWithDates === 0 && cardResult.totalCards === 0) {
+            this.sendLog('error', 'No event cards found. Make sure events are visible on the page.');
+            try {
+              chrome.runtime.sendMessage({
+                type: 'SCAN_COMPLETE',
+                events: [],
+                debug: { eventLinks: 0, totalLinks: result.totalLinks, cardEvents: 0 }
+              });
+            } catch (error) {
+              // Popup is closed, ignore
+            }
+            return;
+          }
+          // Continue to scraper for Lemonade
+        } else {
+          // For Luma: traditional check
+          this.sendLog('error', `No event links found. Make sure you're on a Luma calendar page with events.`);
+          if (result.totalLinks === 0) {
+            this.sendLog('info', `No Luma links detected. The page may still be loading or use a different structure.`);
+            if (result.allSampleHrefs && result.allSampleHrefs.length > 0) {
+              this.sendLog('info', `Sample hrefs found: ${result.allSampleHrefs.map(l => l.href || l.hrefAttr).slice(0, 5).join(', ')}`);
+            }
+          }
+          try {
+            chrome.runtime.sendMessage({
+              type: 'SCAN_COMPLETE',
+              events: [],
+              debug: { eventLinks: 0, totalLinks: result.totalLinks }
+            });
+          } catch (error) {
+            // Popup is closed, ignore
+          }
+          return;
+        }
+      }
+
+      // Use platform-specific scraper
+      if (platform === 'lemonade') {
+        // Use the Lemonade-specific scraper for React card-based pages
+        this.sendLog('info', 'Using Lemonade scraper for card-based detection...');
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: function() {
+            // Inline Lemonade scraper - simplified and robust
+            const events = [];
+            const debugInfo = {
+              totalLinks: 0,
+              eventLinks: 0,
+              cardEvents: 0,
+              parsedCards: [],
+              foundEvents: []
+            };
+
+            console.log('[Event Auto Register] === LEMONADE SCRAPING STARTED ===');
+
+            // STEP 1: Try to find real event URLs from ALL script tags
+            const realUrlMap = new Map(); // normalizedTitle -> realUrl
+            const allScripts = document.querySelectorAll('script');
+            for (const script of allScripts) {
+              const text = script.textContent || '';
+              // Find Lemonade event URLs
+              const urlMatches = text.matchAll(/lemonade\.social\/e\/([a-zA-Z0-9_-]+)/g);
+              for (const match of urlMatches) {
+                const slug = match[1].toLowerCase();
+                const fullUrl = 'https://lemonade.social/e/' + match[1];
+                realUrlMap.set(slug, fullUrl);
+              }
+              // Also find Luma URLs
+              const lumaMatches = text.matchAll(/lu\.ma\/([a-zA-Z0-9_-]+)(?=["',\s\}])/g);
+              for (const match of lumaMatches) {
+                const slug = match[1].toLowerCase();
+                const fullUrl = 'https://lu.ma/' + match[1];
+                realUrlMap.set(slug, fullUrl);
+              }
+            }
+            
+            console.log('[Event Auto Register] Found ' + realUrlMap.size + ' real URLs in scripts');
+            debugInfo.realUrlsFound = realUrlMap.size;
+
+            // Helper function to convert relative dates to absolute dates
+            function resolveRelativeDate(text) {
+              const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+              const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+              const today = new Date();
+              
+              const textLower = text.toLowerCase().trim();
+              
+              // Check for "Tomorrow"
+              if (textLower.includes('tomorrow')) {
+                const tomorrow = new Date(today);
+                tomorrow.setDate(today.getDate() + 1);
+                return months[tomorrow.getMonth()] + ' ' + tomorrow.getDate();
+              }
+              
+              // Check for "Today"
+              if (textLower.includes('today')) {
+                return months[today.getMonth()] + ' ' + today.getDate();
+              }
+              
+              // Check for "Yesterday"
+              if (textLower.includes('yesterday')) {
+                const yesterday = new Date(today);
+                yesterday.setDate(today.getDate() - 1);
+                return months[yesterday.getMonth()] + ' ' + yesterday.getDate();
+              }
+              
+              // Check for day names (e.g., "Saturday", "Monday")
+              for (let i = 0; i < days.length; i++) {
+                if (textLower.includes(days[i].toLowerCase())) {
+                  // Find next occurrence of this day
+                  const targetDay = i;
+                  const currentDay = today.getDay();
+                  let daysUntil = targetDay - currentDay;
+                  if (daysUntil <= 0) daysUntil += 7; // Next week if today or past
+                  
+                  const targetDate = new Date(today);
+                  targetDate.setDate(today.getDate() + daysUntil);
+                  return months[targetDate.getMonth()] + ' ' + targetDate.getDate();
+                }
+              }
+              
+              // Check for "Next [Day]"
+              const nextDayMatch = textLower.match(/next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)/i);
+              if (nextDayMatch) {
+                const dayName = nextDayMatch[1].toLowerCase();
+                const targetDay = days.findIndex(d => d.toLowerCase() === dayName);
+                if (targetDay >= 0) {
+                  const currentDay = today.getDay();
+                  let daysUntil = targetDay - currentDay;
+                  if (daysUntil <= 0) daysUntil += 7;
+                  daysUntil += 7; // Add another week for "next"
+                  
+                  const targetDate = new Date(today);
+                  targetDate.setDate(today.getDate() + daysUntil);
+                  return months[targetDate.getMonth()] + ' ' + targetDate.getDate();
+                }
+              }
+              
+              return null; // Not a relative date
+            }
+            
+            // Find date section headers on the page (like "Tomorrow Saturday", "Feb 10 Monday")
+            function findDateSections() {
+              const sections = [];
+              const headerElements = document.querySelectorAll('h2, h3, h4, div[class*="date"], div[class*="header"], div[class*="section"]');
+              
+              for (const el of headerElements) {
+                const text = (el.textContent || '').trim();
+                if (text.length > 30) continue; // Skip long text
+                
+                // Check if it's a relative date
+                const resolved = resolveRelativeDate(text);
+                if (resolved) {
+                  sections.push({
+                    element: el,
+                    date: resolved,
+                    rect: el.getBoundingClientRect()
+                  });
+                  continue;
+                }
+                
+                // Check for absolute dates like "Feb 10"
+                const absMatch = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+                if (absMatch) {
+                  sections.push({
+                    element: el,
+                    date: absMatch[0],
+                    rect: el.getBoundingClientRect()
+                  });
+                }
+              }
+              
+              return sections;
+            }
+            
+            const dateSections = findDateSections();
+            console.log('[Event Auto Register] Found ' + dateSections.length + ' date sections on page');
+            
+            // Helper to find the date for an element based on its position
+            function getDateForElement(element) {
+              if (!dateSections.length) return null;
+              
+              const rect = element.getBoundingClientRect();
+              
+              // Find the date section that's closest above this element
+              let bestSection = null;
+              let bestDistance = Infinity;
+              
+              for (const section of dateSections) {
+                // Section should be above or at same level as the element
+                if (section.rect.bottom <= rect.top + 10) {
+                  const distance = rect.top - section.rect.bottom;
+                  if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestSection = section;
+                  }
+                }
+              }
+              
+              return bestSection ? bestSection.date : null;
+            }
+
+            // STEP 2: Find event cards - look for divs that contain date patterns
+            const allDivs = document.querySelectorAll('div');
+            const datePattern = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(at|@)\s+\d{1,2}:\d{2}/i;
+            
+            const eventCards = [];
+            for (const div of allDivs) {
+              // Use innerText (not textContent) to preserve visual line breaks!
+              const text = div.innerText || '';
+              // Only consider divs that:
+              // 1. Have a date pattern
+              // 2. Are not too long (not a container)
+              // 3. Have the card class pattern
+              const className = div.className || '';
+              if (datePattern.test(text) && 
+                  text.length > 20 && text.length < 400 &&
+                  className.includes('rounded') && 
+                  className.includes('card')) {
+                eventCards.push(div);
+              }
+            }
+            
+            debugInfo.cardEvents = eventCards.length;
+            console.log('[Event Auto Register] Found ' + eventCards.length + ' event cards');
+            
+            // Process each card
+            const seenTitles = new Set();
+            for (let i = 0; i < eventCards.length; i++) {
+              const card = eventCards[i];
+              // Use innerText to get text with proper line breaks
+              const rawText = card.innerText || '';
+              
+              // Log first few cards for debugging
+              if (i < 3) {
+                console.log('[Event Auto Register] Card ' + i + ' raw text: ' + rawText.substring(0, 100));
+              }
+              
+              // Extract date - try multiple patterns
+              let date = '';
+              
+              // First try: explicit date with time (e.g., "Feb 8 at 7:00 PM")
+              const dateMatch = rawText.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:at|@)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?/i);
+              if (dateMatch) {
+                date = dateMatch[0];
+              }
+              
+              // Second try: just date without time (e.g., "Feb 8")
+              if (!date) {
+                const simpleDateMatch = rawText.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+                if (simpleDateMatch) {
+                  date = simpleDateMatch[0];
+                }
+              }
+              
+              // Third try: relative dates in the card text (e.g., "Tomorrow")
+              if (!date) {
+                const resolved = resolveRelativeDate(rawText);
+                if (resolved) {
+                  date = resolved;
+                }
+              }
+              
+              // Fourth try: get date from page section headers
+              if (!date) {
+                const sectionDate = getDateForElement(card);
+                if (sectionDate) {
+                  date = sectionDate;
+                }
+              }
+              
+              // Extract time from card text (e.g., "1:30 PM", "3:00 PM")
+              // If we got date from section header, append the time
+              const timeMatch = rawText.match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM)?)\b/i);
+              if (timeMatch && date && !date.includes(':')) {
+                // We have a date without time, and found a time in the text
+                date = date + ' at ' + timeMatch[1];
+              }
+              
+              // Split text into segments - use multiple delimiters
+              const segments = rawText
+                .split(/[\n\r]+/)
+                .map(s => s.trim())
+                .filter(s => s.length > 0);
+              
+              if (i < 3) {
+                console.log('[Event Auto Register] Card ' + i + ' segments: ' + JSON.stringify(segments.slice(0, 5)));
+              }
+              
+              // Find the title - it's usually the second non-empty segment (after date)
+              let title = '';
+              let foundDate = false;
+              for (const segment of segments) {
+                // Skip date line
+                if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d/i.test(segment)) {
+                  foundDate = true;
+                  continue;
+                }
+                // Skip other patterns
+                if (/^By\s+/i.test(segment)) continue;
+                if (/^(Free|Paid|External|Online|Virtual)$/i.test(segment)) continue;
+                if (/,\s*(UNITED STATES|USA|US|Denver)$/i.test(segment)) continue;
+                if (segment.length < 3) continue;
+                
+                // This is likely the title
+                if (foundDate || segments.indexOf(segment) > 0) {
+                  title = segment;
+                  break;
+                }
+              }
+              
+              // If we still don't have a title, try a different approach
+              if (!title) {
+                // Look for the longest segment that's not a date or location
+                for (const segment of segments) {
+                  if (segment.length > 10 && 
+                      !datePattern.test(segment) &&
+                      !/^By\s+/i.test(segment) &&
+                      !/(UNITED STATES|Denver)/i.test(segment)) {
+                    title = segment;
+                    break;
+                  }
+                }
+              }
+              
+              if (i < 3) {
+                console.log('[Event Auto Register] Card ' + i + ' extracted title: "' + title + '"');
+                debugInfo.parsedCards.push({ 
+                  segments: segments.slice(0, 5), 
+                  title: title,
+                  date: date 
+                });
+              }
+              
+              if (!title || title.length < 3) continue;
+              if (seenTitles.has(title)) continue;
+              seenTitles.add(title);
+              
+              // Check if this is an external event (Luma hosted on Lemonade)
+              // External events have random URL slugs we can't guess
+              const isExternal = segments.some(s => /^External$/i.test(s.trim())) || 
+                                 title.includes('· Luma') || 
+                                 title.includes('· luma');
+              
+              if (isExternal) {
+                console.log('[Event Auto Register] Skipping external event (URL unknown): ' + title);
+                // Still add it but mark it so user knows
+                events.push({
+                  title: '[EXTERNAL] ' + title.replace(' · Luma', '').replace(' · luma', ''),
+                  url: '', // No URL - can't be auto-registered
+                  eventId: 'external-' + i,
+                  date: date,
+                  platform: 'external',
+                  isExternal: true
+                });
+                debugInfo.foundEvents.push({ title: title, url: 'EXTERNAL - requires manual registration' });
+                continue;
+              }
+              
+              // Generate possible slugs to match against real URLs
+              const titleClean = title.toLowerCase().replace(/[^a-z0-9\s-]/g, '');
+              const possibleSlugs = [
+                titleClean.replace(/\s+/g, ''),      // campbuidl (no spaces/dashes)
+                titleClean.replace(/\s+/g, '-'),     // camp-buidl (with dashes)
+                titleClean.replace(/\s+/g, '_'),     // camp_buidl (with underscores)
+              ];
+              
+              // Try to match to a real URL
+              let url = '';
+              let eventId = '';
+              let matchedReal = false;
+              
+              for (const slug of possibleSlugs) {
+                if (realUrlMap.has(slug)) {
+                  url = realUrlMap.get(slug);
+                  eventId = slug;
+                  matchedReal = true;
+                  console.log('[Event Auto Register] Matched "' + title + '" to real URL: ' + url);
+                  break;
+                }
+              }
+              
+              // If no match found, use NO-DASH version as default (Lemonade convention)
+              if (!matchedReal) {
+                eventId = titleClean.replace(/\s+/g, '').substring(0, 50);
+                url = 'https://lemonade.social/e/' + eventId;
+                console.log('[Event Auto Register] No real URL found for "' + title + '", using: ' + url);
+              }
+              
+              // Clean title
+              let cleanTitle = title.replace(/\s+/g, ' ').trim();
+              if (cleanTitle.length > 100) {
+                cleanTitle = cleanTitle.substring(0, 100) + '...';
+              }
+              
+              events.push({
+                title: cleanTitle,
+                url: url,
+                eventId: eventId,
+                date: date,
+                platform: 'lemonade'
+              });
+              debugInfo.foundEvents.push({ title: cleanTitle, url: url });
+            }
+
+            console.log('[Event Auto Register] === COMPLETE: ' + events.length + ' events ===');
+
+            return {
+              events: events,
+              debug: debugInfo
+            };
+          }
+        });
+
+        const scrapingResult = results[0]?.result;
+        const scrapedEvents = scrapingResult?.events || [];
+        const debugInfo = scrapingResult?.debug || {};
+
+        const externalCount = scrapedEvents.filter(e => e.isExternal).length;
+        const nativeCount = scrapedEvents.length - externalCount;
+        this.sendLog('info', `Events found: ${nativeCount} native Lemonade, ${externalCount} external (Luma)`);
+        if (externalCount > 0) {
+          this.sendLog('info', `⚠ ${externalCount} external events skipped (require manual registration on lu.ma)`);
+        }
+
+        // Get user settings for email (needed for Google Sheets API)
+        const userSettingsResult = await chrome.storage.local.get(['userSettings']);
+        const userEmail = userSettingsResult.userSettings?.email || '';
+
+        // Try Google Sheets API first for multi-person tracking
+        let seenEvents = [];
+        let myRegistrations = [];
+        let useGoogleSheets = false;
+
+        await googleSheetsAPI.refresh(); // Refresh in case settings changed
+        if (googleSheetsAPI.isConfigured() && userEmail) {
+          this.sendLog('info', '📊 Checking Google Sheets for registration status...');
+          const apiResult = await googleSheetsAPI.getScanStatus(userEmail);
+          if (apiResult.success) {
+            seenEvents = apiResult.seenEvents || [];
+            myRegistrations = apiResult.myRegistrations || [];
+            useGoogleSheets = true;
+            this.sendLog('info', `📊 Google Sheets: ${seenEvents.length} seen events, ${myRegistrations.length} registered for ${userEmail}`);
+          } else {
+            this.sendLog('info', '⚠️ Google Sheets unavailable, using local storage');
           }
         }
+
+        // Fall back to local storage if Google Sheets not configured or failed
+        const storageResult = await chrome.storage.local.get(['registeredEvents']);
+        const registeredEvents = storageResult.registeredEvents || {};
+
+        // Format events - filter out external events that can't be auto-registered
+        const formattedEvents = scrapedEvents
+          .filter(event => !event.isExternal && event.url) // Skip external events
+          .map(event => {
+          const eventKey = event.eventId || event.url;
+          const eventUrl = event.url;
+          
+          // Determine registration status
+          let isRegistered;
+          let isNew = false;
+          
+          if (useGoogleSheets) {
+            // Use Google Sheets data - check by URL
+            isRegistered = myRegistrations.includes(eventUrl);
+            isNew = !seenEvents.includes(eventUrl);
+          } else {
+            // Use local storage
+            isRegistered = !!registeredEvents[eventKey];
+          }
+          
+          return {
+            title: event.title,
+            url: event.url,
+            eventId: event.eventId,
+            date: event.date || '',
+            calendarId: calendarId,
+            selected: !isRegistered,
+            status: 'pending',
+            isRegistered: isRegistered,
+            isNew: isNew
+          };
+        });
+
+        // Count stats
+        const newCount = formattedEvents.filter(e => e.isNew).length;
+        const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
+        const availableCount = formattedEvents.filter(e => !e.isRegistered).length;
+
+        // Send results back to popup
         try {
           chrome.runtime.sendMessage({
             type: 'SCAN_COMPLETE',
-            events: [],
-            debug: { eventLinks: 0, totalLinks: result.totalLinks }
+            events: formattedEvents,
+            debug: debugInfo,
+            newCount: newCount,
+            registeredCount: registeredCount
           });
         } catch (error) {
           // Popup is closed, ignore
         }
+
+        if (formattedEvents.length === 0) {
+          this.sendLog('error', 'No events found. Check the Debug Console for details.');
+        } else {
+          let statusMsg = `✓ Scan complete: ${formattedEvents.length} events found`;
+          if (useGoogleSheets) {
+            if (newCount > 0) statusMsg += ` (${newCount} NEW!)`;
+            if (registeredCount > 0) statusMsg += `, ${registeredCount} already registered`;
+          }
+          this.sendLog('success', statusMsg + '!');
+        }
         return;
       }
 
-      // Inject and execute event scraping with inline function
+      // Inject and execute event scraping with inline function (for Luma)
       this.sendLog('info', 'Scraping events from page...');
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         function: function () {
           // This function runs in the page context
-          console.log('[Luma Auto Register] === SCRAPING STARTED ===');
+          console.log('[Event Auto Register] === SCRAPING STARTED ===');
 
           var events = [];
           var debugInfo = {
@@ -501,6 +1418,130 @@ class RegistrationManager {
             filteredOut: [],
             foundEvents: []
           };
+          
+          // Helper function to convert relative dates to absolute dates
+          var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          var dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+          
+          function resolveRelativeDate(text) {
+            var today = new Date();
+            var textLower = text.toLowerCase().trim();
+            
+            // Check for "Tomorrow"
+            if (textLower.includes('tomorrow')) {
+              var tomorrow = new Date(today);
+              tomorrow.setDate(today.getDate() + 1);
+              return months[tomorrow.getMonth()] + ' ' + tomorrow.getDate();
+            }
+            
+            // Check for "Today"
+            if (textLower.includes('today')) {
+              return months[today.getMonth()] + ' ' + today.getDate();
+            }
+            
+            // Check for "Yesterday"
+            if (textLower.includes('yesterday')) {
+              var yesterday = new Date(today);
+              yesterday.setDate(today.getDate() - 1);
+              return months[yesterday.getMonth()] + ' ' + yesterday.getDate();
+            }
+            
+            // Check for day names (e.g., "Saturday", "Monday")
+            for (var i = 0; i < dayNames.length; i++) {
+              if (textLower.includes(dayNames[i].toLowerCase())) {
+                var targetDay = i;
+                var currentDay = today.getDay();
+                var daysUntil = targetDay - currentDay;
+                if (daysUntil <= 0) daysUntil += 7; // Next week if today or past
+                
+                var targetDate = new Date(today);
+                targetDate.setDate(today.getDate() + daysUntil);
+                return months[targetDate.getMonth()] + ' ' + targetDate.getDate();
+              }
+            }
+            
+            // Check for "Next [Day]"
+            var nextDayMatch = textLower.match(/next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)/i);
+            if (nextDayMatch) {
+              var dayName = nextDayMatch[1].toLowerCase();
+              var targetDayIdx = dayNames.findIndex(function(d) { return d.toLowerCase() === dayName; });
+              if (targetDayIdx >= 0) {
+                var currentDayIdx = today.getDay();
+                var daysUntilTarget = targetDayIdx - currentDayIdx;
+                if (daysUntilTarget <= 0) daysUntilTarget += 7;
+                daysUntilTarget += 7; // Add another week for "next"
+                
+                var nextDate = new Date(today);
+                nextDate.setDate(today.getDate() + daysUntilTarget);
+                return months[nextDate.getMonth()] + ' ' + nextDate.getDate();
+              }
+            }
+            
+            return null; // Not a relative date
+          }
+          
+          // Find date section headers on the page (like "Tomorrow Saturday", "Feb 10 Monday")
+          function findDateSections() {
+            var sections = [];
+            var headerElements = document.querySelectorAll('h2, h3, h4, div[class*="date"], div[class*="header"], div[class*="section"]');
+            
+            for (var idx = 0; idx < headerElements.length; idx++) {
+              var el = headerElements[idx];
+              var text = (el.textContent || '').trim();
+              if (text.length > 30) continue; // Skip long text
+              
+              // Check if it's a relative date
+              var resolved = resolveRelativeDate(text);
+              if (resolved) {
+                sections.push({
+                  element: el,
+                  date: resolved,
+                  rect: el.getBoundingClientRect()
+                });
+                continue;
+              }
+              
+              // Check for absolute dates like "Feb 10"
+              var absMatch = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+              if (absMatch) {
+                sections.push({
+                  element: el,
+                  date: absMatch[0],
+                  rect: el.getBoundingClientRect()
+                });
+              }
+            }
+            
+            return sections;
+          }
+          
+          var dateSections = findDateSections();
+          console.log('[Event Auto Register] Found ' + dateSections.length + ' date sections on page');
+          
+          // Helper to find the date for an element based on its position
+          function getDateForElement(element) {
+            if (!dateSections.length) return null;
+            
+            var rect = element.getBoundingClientRect();
+            
+            // Find the date section that's closest above this element
+            var bestSection = null;
+            var bestDistance = Infinity;
+            
+            for (var i = 0; i < dateSections.length; i++) {
+              var section = dateSections[i];
+              // Section should be above or at same level as the element
+              if (section.rect.bottom <= rect.top + 10) {
+                var distance = rect.top - section.rect.bottom;
+                if (distance < bestDistance) {
+                  bestDistance = distance;
+                  bestSection = section;
+                }
+              }
+            }
+            
+            return bestSection ? bestSection.date : null;
+          }
 
           // Find all event links - try multiple selectors
           var eventLinks = document.querySelectorAll('a.event-link');
@@ -578,10 +1619,10 @@ class RegistrationManager {
           debugInfo.eventLinks = eventLinks.length;
           debugInfo.totalLinks = document.querySelectorAll('a').length;
 
-          console.log('[Luma Auto Register] Found ' + eventLinks.length + ' event links');
+          console.log('[Event Auto Register] Found ' + eventLinks.length + ' event links');
 
           if (eventLinks.length === 0) {
-            console.error('[Luma Auto Register] ERROR: No event links found!');
+            console.error('[Event Auto Register] ERROR: No event links found!');
             return { events: [], debug: debugInfo };
           }
 
@@ -593,7 +1634,7 @@ class RegistrationManager {
             var hrefAttr = link.getAttribute('href') || '';
 
             if (i < 5) {
-              console.log('[Luma Auto Register] Processing: ' + href);
+              console.log('[Event Auto Register] Processing: ' + href);
             }
 
             // Skip calendar pages and non-event URLs
@@ -660,6 +1701,105 @@ class RegistrationManager {
                 title = title.substring(0, 100);
               }
 
+              // Try to extract event date from the page structure
+              var eventDate = '';
+              var datePatterns = [
+                /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i,
+                /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}/i,
+                /^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i
+              ];
+              
+              // Walk up the DOM to find date headers
+              var searchNode = link;
+              for (var d = 0; d < 10 && searchNode && !eventDate; d++) {
+                searchNode = searchNode.parentElement;
+                if (!searchNode) break;
+                
+                // Look for previous siblings that might be date headers
+                var prevSibling = searchNode.previousElementSibling;
+                while (prevSibling && !eventDate) {
+                  var sibText = prevSibling.textContent.trim();
+                  for (var dp = 0; dp < datePatterns.length; dp++) {
+                    var dateMatch = sibText.match(datePatterns[dp]);
+                    if (dateMatch) {
+                      eventDate = dateMatch[0];
+                      break;
+                    }
+                  }
+                  // Also check for time indicators that might have date nearby
+                  if (!eventDate && prevSibling.querySelector) {
+                    var dateEl = prevSibling.querySelector('[class*="date"], [class*="day"], time');
+                    if (dateEl) {
+                      var dateText = dateEl.textContent.trim();
+                      for (var dp2 = 0; dp2 < datePatterns.length; dp2++) {
+                        var dateMatch2 = dateText.match(datePatterns[dp2]);
+                        if (dateMatch2) {
+                          eventDate = dateMatch2[0];
+                          break;
+                        }
+                      }
+                    }
+                  }
+                  prevSibling = prevSibling.previousElementSibling;
+                }
+                
+                // Also check parent's text content for date patterns
+                if (!eventDate) {
+                  var parentText = searchNode.textContent.substring(0, 200);
+                  for (var dp3 = 0; dp3 < datePatterns.length; dp3++) {
+                    var dateMatch3 = parentText.match(datePatterns[dp3]);
+                    if (dateMatch3) {
+                      eventDate = dateMatch3[0];
+                      break;
+                    }
+                  }
+                }
+              }
+              
+              // Also try to find date from time elements or data attributes
+              if (!eventDate) {
+                var timeEl = link.closest('[data-start]') || link.querySelector('time') || 
+                            (parent && parent.querySelector('time'));
+                if (timeEl) {
+                  var dataStart = timeEl.getAttribute('data-start') || timeEl.getAttribute('datetime');
+                  if (dataStart) {
+                    try {
+                      var dateObj = new Date(dataStart);
+                      if (!isNaN(dateObj.getTime())) {
+                        var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                        eventDate = months[dateObj.getMonth()] + ' ' + dateObj.getDate();
+                      }
+                    } catch (e) {}
+                  }
+                }
+              }
+              
+              // Try relative date resolution from parent elements (Tomorrow, Today, Saturday, etc.)
+              if (!eventDate) {
+                var relativeSearch = link;
+                for (var r = 0; r < 10 && relativeSearch && !eventDate; r++) {
+                  relativeSearch = relativeSearch.parentElement;
+                  if (!relativeSearch) break;
+                  
+                  var prevEl = relativeSearch.previousElementSibling;
+                  while (prevEl && !eventDate) {
+                    var elText = (prevEl.textContent || '').trim();
+                    if (elText.length < 50) {
+                      var resolved = resolveRelativeDate(elText);
+                      if (resolved) {
+                        eventDate = resolved;
+                      }
+                    }
+                    prevEl = prevEl.previousElementSibling;
+                  }
+                }
+              }
+              
+              // Also use the dateSections helper if available
+              if (!eventDate && typeof getDateForElement === 'function') {
+                eventDate = getDateForElement(link) || '';
+              }
+
               // Add event
               var exists = false;
               for (var k = 0; k < events.length; k++) {
@@ -673,18 +1813,19 @@ class RegistrationManager {
                 events.push({
                   title: title,
                   url: absoluteUrl,
-                  eventId: eventId
+                  eventId: eventId,
+                  date: eventDate || ''
                 });
-                debugInfo.foundEvents.push({ title: title });
+                debugInfo.foundEvents.push({ title: title, date: eventDate });
                 if (i < 5) {
-                  console.log('[Luma Auto Register] Added: ' + title);
+                  console.log('[Event Auto Register] Added: ' + title + (eventDate ? ' (' + eventDate + ')' : ''));
                 }
               }
             }
           }
 
-          console.log('[Luma Auto Register] === COMPLETE ===');
-          console.log('[Luma Auto Register] Found ' + events.length + ' events');
+          console.log('[Event Auto Register] === COMPLETE ===');
+          console.log('[Event Auto Register] Found ' + events.length + ' events');
 
           return { events: events, debug: debugInfo };
         }
@@ -699,20 +1840,76 @@ class RegistrationManager {
       this.sendLog('info', `Event links: ${debugInfo.eventLinks || 0}`);
       this.sendLog('info', `Events extracted: ${scrapedEvents.length}`);
 
-      // Format events
-      const formattedEvents = scrapedEvents.map(event => ({
-        title: event.title,
-        url: event.url,
-        selected: true,
-        status: 'pending'
-      }));
+      // Get user settings for email (needed for Google Sheets API)
+      const userSettingsResult = await chrome.storage.local.get(['userSettings']);
+      const userEmail = userSettingsResult.userSettings?.email || '';
+
+      // Try Google Sheets API first for multi-person tracking
+      let seenEvents = [];
+      let myRegistrations = [];
+      let useGoogleSheets = false;
+
+      await googleSheetsAPI.refresh(); // Refresh in case settings changed
+      if (googleSheetsAPI.isConfigured() && userEmail) {
+        this.sendLog('info', '📊 Checking Google Sheets for registration status...');
+        const apiResult = await googleSheetsAPI.getScanStatus(userEmail);
+        if (apiResult.success) {
+          seenEvents = apiResult.seenEvents || [];
+          myRegistrations = apiResult.myRegistrations || [];
+          useGoogleSheets = true;
+          this.sendLog('info', `📊 Google Sheets: ${seenEvents.length} seen events, ${myRegistrations.length} registered for ${userEmail}`);
+        } else {
+          this.sendLog('info', '⚠️ Google Sheets unavailable, using local storage');
+        }
+      }
+
+      // Load registered events from local storage (used as fallback or cache)
+      const storageResult = await chrome.storage.local.get(['registeredEvents']);
+      const registeredEvents = storageResult.registeredEvents || {};
+
+      // Format events and check if already registered
+      const formattedEvents = scrapedEvents.map(event => {
+        const eventKey = event.eventId || event.url;
+        const eventUrl = event.url;
+        
+        // Determine registration status
+        let isRegistered;
+        let isNew = false;
+        
+        if (useGoogleSheets) {
+          // Use Google Sheets data - check by URL
+          isRegistered = myRegistrations.includes(eventUrl);
+          isNew = !seenEvents.includes(eventUrl);
+        } else {
+          // Use local storage
+          isRegistered = !!registeredEvents[eventKey];
+        }
+        
+        return {
+          title: event.title,
+          url: event.url,
+          eventId: event.eventId,
+          date: event.date || '',
+          calendarId: calendarId,
+          selected: !isRegistered, // Auto-deselect already registered events
+          status: 'pending',
+          isRegistered: isRegistered,
+          isNew: isNew
+        };
+      });
+
+      // Count stats
+      const newCount = formattedEvents.filter(e => e.isNew).length;
+      const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
 
       // Send results back to popup
       try {
         chrome.runtime.sendMessage({
           type: 'SCAN_COMPLETE',
           events: formattedEvents,
-          debug: debugInfo
+          debug: debugInfo,
+          newCount: newCount,
+          registeredCount: registeredCount
         });
       } catch (error) {
         // Popup is closed, ignore
@@ -721,11 +1918,18 @@ class RegistrationManager {
       if (formattedEvents.length === 0) {
         this.sendLog('error', 'No events found. Check Debug Console for details.');
       } else {
-        this.sendLog('success', `✓ Scan complete: ${formattedEvents.length} events found!`);
+        let statusMsg = `✓ Scan complete: ${formattedEvents.length} events found`;
+        if (useGoogleSheets) {
+          if (newCount > 0) statusMsg += ` (${newCount} NEW!)`;
+          if (registeredCount > 0) statusMsg += `, ${registeredCount} already registered`;
+        } else if (registeredCount > 0) {
+          statusMsg = `✓ Scan complete: ${formattedEvents.filter(e => !e.isRegistered).length} new events, ${registeredCount} already registered`;
+        }
+        this.sendLog('success', statusMsg + '!');
       }
     } catch (error) {
       this.sendLog('error', `Scan failed: ${error.message}`);
-      console.error('[Luma Auto Register] Scan error:', error);
+      console.error('[Event Auto Register] Scan error:', error);
       try {
         chrome.runtime.sendMessage({
           type: 'SCAN_COMPLETE',
@@ -740,6 +1944,10 @@ class RegistrationManager {
   async startScan(url) {
     try {
       this.sendLog('info', `Opening calendar page: ${url}`);
+
+      // Extract calendar ID from URL for Google Sheets organization
+      const calendarId = extractCalendarId(url);
+      console.log('[Background] Calendar ID extracted for scan:', calendarId);
 
       // Open the calendar page in a new VISIBLE tab (browsers prioritize visible tabs)
       // Try to open in current window, or create new window if needed
@@ -877,13 +2085,14 @@ class RegistrationManager {
         }
       }
 
-      // Now perform gradual scrolling
+      // Now perform gradual scrolling with proper lazy-load detection
       let noProgressCount = 0;
-      const maxNoProgress = 3; // Stop if no progress for 3 consecutive scrolls
+      const maxNoProgress = 4; // Stop if no progress for 4 consecutive checks
 
-      for (let i = 0; i < 20; i++) {
-        console.log(`[Background] Scroll ${i + 1}/20 starting...`);
+      for (let i = 0; i < 25; i++) {
+        console.log(`[Background] Scroll ${i + 1}/25 starting...`);
         try {
+          // Step 1: Perform the scroll
           const scrollResult = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: () => {
@@ -892,11 +2101,9 @@ class RegistrationManager {
                 document.documentElement.scrollHeight
               );
 
-              // Get previous scroll positions
               var previousWindowScroll = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
-              var previousContainerScrolls = [];
 
-              // Find scrollable containers again (they might have changed)
+              // Find scrollable containers
               var allElements = document.querySelectorAll('*');
               var containers = [];
 
@@ -907,17 +2114,11 @@ class RegistrationManager {
 
                 if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
                   el.scrollHeight > el.clientHeight && el.scrollHeight > 100) {
-                  previousContainerScrolls.push({
-                    element: el,
-                    previousScroll: el.scrollTop,
-                    scrollHeight: el.scrollHeight,
-                    clientHeight: el.clientHeight
-                  });
                   containers.push(el);
                 }
               }
 
-              // Scroll window quickly (scroll down by 1.5x viewport height for faster scanning)
+              // Scroll window fast but with randomization
               var windowHeight = window.innerHeight || document.documentElement.clientHeight;
               var currentWindowScroll = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
               var maxWindowScroll = Math.max(
@@ -926,13 +2127,14 @@ class RegistrationManager {
               ) - windowHeight;
 
               if (maxWindowScroll > 0) {
-                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * 1.5, maxWindowScroll);
-                window.scrollTo({ top: nextWindowScroll, behavior: 'smooth' }); // Smooth but fast scrolling
+                var scrollMultiplier = 5 + Math.random() * 3;
+                var nextWindowScroll = Math.min(currentWindowScroll + windowHeight * scrollMultiplier, maxWindowScroll);
+                window.scrollTo({ top: nextWindowScroll, behavior: 'auto' });
                 document.documentElement.scrollTop = nextWindowScroll;
                 document.body.scrollTop = nextWindowScroll;
               }
 
-              // Scroll containers quickly
+              // Scroll containers
               for (var c = 0; c < containers.length; c++) {
                 var container = containers[c];
                 var containerHeight = container.clientHeight;
@@ -940,36 +2142,23 @@ class RegistrationManager {
                 var maxScroll = container.scrollHeight - containerHeight;
 
                 if (maxScroll > 0) {
-                  var nextScroll = Math.min(currentScroll + containerHeight * 1.5, maxScroll);
+                  var containerScrollMultiplier = 5 + Math.random() * 3;
+                  var nextScroll = Math.min(currentScroll + containerHeight * containerScrollMultiplier, maxScroll);
                   container.scrollTop = nextScroll;
                 }
               }
 
-              // Dispatch scroll events
+              // Dispatch scroll events to trigger lazy loading
               window.dispatchEvent(new Event('scroll', { bubbles: true }));
               document.dispatchEvent(new Event('scroll', { bubbles: true }));
               for (var c = 0; c < containers.length; c++) {
                 containers[c].dispatchEvent(new Event('scroll', { bubbles: true }));
               }
 
-              // Brief wait for content to load (reduced for speed)
-              var startTime = Date.now();
-              while (Date.now() - startTime < 100) {
-                // Busy wait for 100ms
-              }
-
-              // Check new content height
-              var newContentHeight = Math.max(
-                document.body.scrollHeight,
-                document.documentElement.scrollHeight
-              );
-
               var currentWindowScrollAfter = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop;
 
               return {
                 previousContentHeight: previousContentHeight,
-                newContentHeight: newContentHeight,
-                contentGrew: newContentHeight > previousContentHeight,
                 previousWindowScroll: previousWindowScroll,
                 currentWindowScroll: currentWindowScrollAfter,
                 maxWindowScroll: maxWindowScroll,
@@ -980,35 +2169,101 @@ class RegistrationManager {
             }
           });
 
-          const result = scrollResult[0]?.result;
-          if (result) {
-            console.log(`[Background] Scroll ${i + 1}/20 result:`, result);
-            const progressMsg = result.contentGrew ? '✓ Content loaded' :
-              result.windowScrolled ? '→ Scrolled' : '⚠ No progress';
-            this.sendLog('info', `  Scroll ${i + 1}/20: ${progressMsg} (height: ${result.newContentHeight}, pos: ${Math.round(result.currentWindowScroll)})`);
+          const scrollData = scrollResult[0]?.result;
+          if (!scrollData) {
+            console.log(`[Background] Scroll ${i + 1}/25 complete (no result)`);
+            this.sendLog('info', `  Scroll ${i + 1}/25 complete`);
+            await this.sleep(1000);
+            continue;
+          }
 
-            // Check if we made progress
-            if (result.contentGrew || result.windowScrolled) {
+          // Step 2: Wait for lazy-loaded content (1.5 seconds for better detection)
+          await this.sleep(1500);
+
+          // Step 3: Check if content grew after waiting
+          const contentCheckResult = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (prevHeight) => {
+              var newContentHeight = Math.max(
+                document.body.scrollHeight,
+                document.documentElement.scrollHeight
+              );
+              
+              // Check for loading indicators on Luma pages
+              var isLoading = !!(
+                document.querySelector('[class*="loading"]') ||
+                document.querySelector('[class*="spinner"]') ||
+                document.querySelector('[class*="skeleton"]') ||
+                document.querySelector('[data-loading="true"]') ||
+                document.querySelector('[class*="Loading"]') ||
+                document.querySelector('.animate-pulse')
+              );
+              
+              return {
+                previousContentHeight: prevHeight,
+                newContentHeight: newContentHeight,
+                contentGrew: newContentHeight > prevHeight,
+                heightDiff: newContentHeight - prevHeight,
+                isLoading: isLoading
+              };
+            },
+            args: [scrollData.previousContentHeight]
+          });
+
+          const contentData = contentCheckResult[0]?.result;
+          
+          // Step 4: If still loading or content grew, wait more and check again
+          if (contentData && (contentData.isLoading || contentData.contentGrew)) {
+            this.sendLog('info', `  Scroll ${i + 1}/25: Content loading... waiting for more`);
+            await this.sleep(1000); // Extra wait for content to finish loading
+            
+            const finalCheckResult = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              func: (prevHeight) => {
+                return {
+                  newContentHeight: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+                  contentGrew: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) > prevHeight
+                };
+              },
+              args: [scrollData.previousContentHeight]
+            });
+            
+            const finalData = finalCheckResult[0]?.result;
+            const grewAfterWait = finalData?.contentGrew || contentData.contentGrew;
+            
+            console.log(`[Background] Scroll ${i + 1}/25 result: contentGrew=${grewAfterWait}, scrolled=${scrollData.windowScrolled}`);
+            const progressMsg = grewAfterWait ? '✓ Content loaded' :
+              scrollData.windowScrolled ? '→ Scrolled' : '⚠ No progress';
+            this.sendLog('info', `  Scroll ${i + 1}/25: ${progressMsg} (height: ${finalData?.newContentHeight || contentData.newContentHeight}, pos: ${Math.round(scrollData.currentWindowScroll)})`);
+
+            if (grewAfterWait || scrollData.windowScrolled) {
               noProgressCount = 0;
             } else {
               noProgressCount++;
             }
-
-            // Stop early if we've reached the bottom and no new content is loading
-            if (result.reachedBottom && !result.contentGrew && noProgressCount >= 2) {
-              this.sendLog('info', 'Reached bottom with no new content. Stopping scroll.');
-              break;
-            }
           } else {
-            console.log(`[Background] Scroll ${i + 1}/20 complete (no result)`);
-            this.sendLog('info', `  Scroll ${i + 1}/20 complete`);
+            console.log(`[Background] Scroll ${i + 1}/25 result: scrolled=${scrollData.windowScrolled}, reachedBottom=${scrollData.reachedBottom}`);
+            const progressMsg = scrollData.windowScrolled ? '→ Scrolled' : '⚠ No progress';
+            this.sendLog('info', `  Scroll ${i + 1}/25: ${progressMsg} (height: ${contentData?.newContentHeight || scrollData.previousContentHeight}, pos: ${Math.round(scrollData.currentWindowScroll)})`);
+
+            if (scrollData.windowScrolled) {
+              noProgressCount = 0;
+            } else {
+              noProgressCount++;
+            }
+          }
+
+          // Stop early if reached bottom and no new content after multiple tries
+          if (scrollData.reachedBottom && noProgressCount >= maxNoProgress) {
+            this.sendLog('info', `Reached bottom with no new content after ${maxNoProgress} checks. Stopping scroll.`);
+            break;
           }
         } catch (error) {
           console.error(`[Background] Scroll ${i + 1} error:`, error);
-          this.sendLog('warn', `  Scroll ${i + 1}/20 failed: ${error.message}`);
+          this.sendLog('warn', `  Scroll ${i + 1}/25 failed: ${error.message}`);
         }
 
-        await this.sleep(400); // Wait 400ms between scrolls for lazy loading (faster scanning)
+        await this.sleep(300); // Small delay between scroll iterations
       }
 
       // Scroll back to top
@@ -1027,8 +2282,8 @@ class RegistrationManager {
       }
       await this.sleep(1500);
 
-      // Wait for React to render event links - be VERY patient
-      this.sendLog('info', 'Waiting for React to render event links...');
+      // Wait for page to render event links - be VERY patient
+      this.sendLog('info', 'Waiting for page to render event links...');
       let eventLinksFound = false;
       let attempts = 0;
       const maxAttempts = 15; // Up to 30 seconds of checking
@@ -1036,8 +2291,16 @@ class RegistrationManager {
       while (!eventLinksFound && attempts < maxAttempts) {
         const checkLinks = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          function: () => {
-            const eventLinks = document.querySelectorAll('a.event-link');
+          args: [platform],
+          function: (platform) => {
+            let eventLinks;
+            if (platform === 'lemonade') {
+              // Lemonade uses various event card structures
+              eventLinks = document.querySelectorAll('a[href*="/e/"], a[href*="/event/"], [class*="event"] a, [class*="Event"] a');
+            } else {
+              // Luma uses .event-link class
+              eventLinks = document.querySelectorAll('a.event-link');
+            }
             const totalLinks = document.querySelectorAll('a').length;
             return { eventLinks: eventLinks.length, totalLinks: totalLinks };
           }
@@ -1056,20 +2319,22 @@ class RegistrationManager {
       }
 
       if (!eventLinksFound) {
-        this.sendLog('error', 'Event links did not render. React may not be loading properly.');
+        this.sendLog('error', 'Event links did not render. The page may not be loading properly.');
         this.sendLog('error', 'Try: 1) Refresh the page manually, 2) Scroll down, 3) Run scan again');
       }
 
-      // Inject and execute event scraping
-      this.sendLog('info', 'Scraping events from page...');
+      // Inject and execute event scraping based on platform
+      this.sendLog('info', `Scraping events from ${platform} page...`);
+      const scraperFunction = platform === 'lemonade' ? this.scrapeLemonadeEventsFromPage : this.scrapeEventsFromPage;
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        function: this.scrapeEventsFromPage
+        function: scraperFunction
       });
 
       const scrapingResult = results[0]?.result;
       const scrapedEvents = scrapingResult?.events || [];
       const debugInfo = scrapingResult?.debug || {};
+
 
       // Log debug information
       this.sendLog('info', `Total links found: ${debugInfo.totalLinks || 0}`);
@@ -1085,20 +2350,76 @@ class RegistrationManager {
       await this.sleep(3000);
       await chrome.tabs.remove(tab.id);
 
-      // Format events
-      const formattedEvents = scrapedEvents.map(event => ({
-        title: event.title,
-        url: event.url,
-        selected: true,
-        status: 'pending'
-      }));
+      // Get user settings for email (needed for Google Sheets API)
+      const userSettingsResult = await chrome.storage.local.get(['userSettings']);
+      const userEmail = userSettingsResult.userSettings?.email || '';
+
+      // Try Google Sheets API first for multi-person tracking
+      let seenEvents = [];
+      let myRegistrations = [];
+      let useGoogleSheets = false;
+
+      await googleSheetsAPI.refresh(); // Refresh in case settings changed
+      if (googleSheetsAPI.isConfigured() && userEmail) {
+        this.sendLog('info', '📊 Checking Google Sheets for registration status...');
+        const apiResult = await googleSheetsAPI.getScanStatus(userEmail);
+        if (apiResult.success) {
+          seenEvents = apiResult.seenEvents || [];
+          myRegistrations = apiResult.myRegistrations || [];
+          useGoogleSheets = true;
+          this.sendLog('info', `📊 Google Sheets: ${seenEvents.length} seen events, ${myRegistrations.length} registered for ${userEmail}`);
+        } else {
+          this.sendLog('info', '⚠️ Google Sheets unavailable, using local storage');
+        }
+      }
+
+      // Load registered events from local storage (used as fallback or cache)
+      const storageResult = await chrome.storage.local.get(['registeredEvents']);
+      const registeredEvents = storageResult.registeredEvents || {};
+
+      // Format events and check if already registered
+      const formattedEvents = scrapedEvents.map(event => {
+        const eventKey = event.eventId || event.url;
+        const eventUrl = event.url;
+        
+        // Determine registration status
+        let isRegistered;
+        let isNew = false;
+        
+        if (useGoogleSheets) {
+          // Use Google Sheets data - check by URL
+          isRegistered = myRegistrations.includes(eventUrl);
+          isNew = !seenEvents.includes(eventUrl);
+        } else {
+          // Use local storage
+          isRegistered = !!registeredEvents[eventKey];
+        }
+        
+        return {
+          title: event.title,
+          url: event.url,
+          eventId: event.eventId,
+          date: event.date || '',
+          calendarId: calendarId,
+          selected: !isRegistered, // Auto-deselect already registered events
+          status: 'pending',
+          isRegistered: isRegistered,
+          isNew: isNew
+        };
+      });
+
+      // Count stats
+      const newCount = formattedEvents.filter(e => e.isNew).length;
+      const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
 
       // Send results back to popup
       try {
         chrome.runtime.sendMessage({
           type: 'SCAN_COMPLETE',
           events: formattedEvents,
-          debug: debugInfo
+          debug: debugInfo,
+          newCount: newCount,
+          registeredCount: registeredCount
         });
       } catch (error) {
         // Popup is closed, ignore
@@ -1107,11 +2428,18 @@ class RegistrationManager {
       if (formattedEvents.length === 0) {
         this.sendLog('error', 'No events found. Check the Debug Console for details.');
       } else {
-        this.sendLog('success', `✓ Scan complete: ${formattedEvents.length} events found!`);
+        let statusMsg = `✓ Scan complete: ${formattedEvents.length} events found`;
+        if (useGoogleSheets) {
+          if (newCount > 0) statusMsg += ` (${newCount} NEW!)`;
+          if (registeredCount > 0) statusMsg += `, ${registeredCount} already registered`;
+        } else if (registeredCount > 0) {
+          statusMsg = `✓ Scan complete: ${formattedEvents.filter(e => !e.isRegistered).length} new events, ${registeredCount} already registered`;
+        }
+        this.sendLog('success', statusMsg + '!');
       }
     } catch (error) {
       this.sendLog('error', `Scan failed: ${error.message}`);
-      console.error('[Luma Auto Register] Scan error:', error);
+      console.error('[Event Auto Register] Scan error:', error);
       try {
         chrome.runtime.sendMessage({
           type: 'SCAN_COMPLETE',
@@ -1133,17 +2461,97 @@ class RegistrationManager {
       foundEvents: []
     };
 
-    console.log('[Luma Auto Register] === SCRAPING STARTED ===');
+    console.log('[Event Auto Register] === SCRAPING STARTED ===');
+    
+    // Helper function to convert relative dates to absolute dates
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    
+    function resolveRelativeDate(text) {
+      const today = new Date();
+      const textLower = text.toLowerCase().trim();
+      
+      if (textLower.includes('tomorrow')) {
+        const tomorrow = new Date(today);
+        tomorrow.setDate(today.getDate() + 1);
+        return months[tomorrow.getMonth()] + ' ' + tomorrow.getDate();
+      }
+      if (textLower.includes('today')) {
+        return months[today.getMonth()] + ' ' + today.getDate();
+      }
+      if (textLower.includes('yesterday')) {
+        const yesterday = new Date(today);
+        yesterday.setDate(today.getDate() - 1);
+        return months[yesterday.getMonth()] + ' ' + yesterday.getDate();
+      }
+      
+      for (let i = 0; i < dayNames.length; i++) {
+        if (textLower.includes(dayNames[i].toLowerCase())) {
+          const targetDay = i;
+          const currentDay = today.getDay();
+          let daysUntil = targetDay - currentDay;
+          if (daysUntil <= 0) daysUntil += 7;
+          
+          const targetDate = new Date(today);
+          targetDate.setDate(today.getDate() + daysUntil);
+          return months[targetDate.getMonth()] + ' ' + targetDate.getDate();
+        }
+      }
+      return null;
+    }
+    
+    // Find date section headers
+    function findDateSections() {
+      const sections = [];
+      const headerElements = document.querySelectorAll('h2, h3, h4, div[class*="date"], div[class*="header"], div[class*="section"]');
+      
+      for (const el of headerElements) {
+        const text = (el.textContent || '').trim();
+        if (text.length > 30) continue;
+        
+        const resolved = resolveRelativeDate(text);
+        if (resolved) {
+          sections.push({ element: el, date: resolved, rect: el.getBoundingClientRect() });
+          continue;
+        }
+        
+        const absMatch = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+        if (absMatch) {
+          sections.push({ element: el, date: absMatch[0], rect: el.getBoundingClientRect() });
+        }
+      }
+      return sections;
+    }
+    
+    const dateSections = findDateSections();
+    
+    function getDateForElement(element) {
+      if (!dateSections.length) return null;
+      const rect = element.getBoundingClientRect();
+      let bestSection = null;
+      let bestDistance = Infinity;
+      
+      for (const section of dateSections) {
+        if (section.rect.bottom <= rect.top + 10) {
+          const distance = rect.top - section.rect.bottom;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestSection = section;
+          }
+        }
+      }
+      return bestSection ? bestSection.date : null;
+    }
 
     // Look specifically for event-link elements
     const eventLinks = document.querySelectorAll('a.event-link');
     debugInfo.eventLinks = eventLinks.length;
     debugInfo.totalLinks = document.querySelectorAll('a').length;
 
-    console.log('[Luma Auto Register] Found ' + eventLinks.length + ' event links out of ' + debugInfo.totalLinks + ' total links');
+    console.log('[Event Auto Register] Found ' + eventLinks.length + ' event links out of ' + debugInfo.totalLinks + ' total links');
 
     if (eventLinks.length === 0) {
-      console.error('[Luma Auto Register] ERROR: No event links found!');
+      console.error('[Event Auto Register] ERROR: No event links found!');
       return { events: [], debug: debugInfo };
     }
 
@@ -1152,7 +2560,7 @@ class RegistrationManager {
       const href = link.href;
 
       if (index < 5) {
-        console.log('[Luma Auto Register] Processing link ' + index + ': ' + href);
+        console.log('[Event Auto Register] Processing link ' + index + ': ' + href);
       }
 
       // Filter out non-event pages
@@ -1221,14 +2629,46 @@ class RegistrationManager {
         }
 
         if (!alreadyExists) {
+          // Extract date
+          let eventDate = '';
+          const parent = link.closest('div');
+          
+          // Try to get date from parent text
+          if (parent) {
+            const parentText = parent.textContent || '';
+            const dateMatch = parentText.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+            if (dateMatch) {
+              eventDate = dateMatch[0];
+            }
+          }
+          
+          // Try relative date from parent
+          if (!eventDate && parent) {
+            const resolved = resolveRelativeDate(parent.textContent || '');
+            if (resolved) eventDate = resolved;
+          }
+          
+          // Try date sections
+          if (!eventDate) {
+            eventDate = getDateForElement(link) || '';
+          }
+          
+          // Extract time and append if we have date
+          const timeMatch = (parent?.textContent || '').match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM)?)\b/i);
+          if (timeMatch && eventDate && !eventDate.includes(':')) {
+            eventDate = eventDate + ' at ' + timeMatch[1];
+          }
+          
           events.push({
             title: title,
             url: href,
-            eventId: eventId
+            eventId: eventId,
+            date: eventDate,
+            platform: 'luma'
           });
-          debugInfo.foundEvents.push({ title: title, url: href, eventId: eventId });
+          debugInfo.foundEvents.push({ title: title, url: href, eventId: eventId, date: eventDate });
           if (index < 5) {
-            console.log('[Luma Auto Register] Added: ' + title);
+            console.log('[Event Auto Register] Added: ' + title + (eventDate ? ' (' + eventDate + ')' : ''));
           }
         }
       } else {
@@ -1236,13 +2676,556 @@ class RegistrationManager {
       }
     }
 
-    console.log('[Luma Auto Register] === SCRAPING COMPLETE ===');
-    console.log('[Luma Auto Register] Final count: ' + events.length + ' events');
+    console.log('[Event Auto Register] === SCRAPING COMPLETE ===');
+    console.log('[Event Auto Register] Final count: ' + events.length + ' events');
 
     return {
       events: events,
       debug: debugInfo
     };
+  }
+
+  // Lemonade.social event scraper - injected into page context
+  // This scraper handles Lemonade's React SPA architecture where event cards
+  // don't use traditional anchor tags with href attributes
+  scrapeLemonadeEventsFromPage() {
+    const events = [];
+    const debugInfo = {
+      totalLinks: 0,
+      eventLinks: 0,
+      cardEvents: 0,
+      nextDataEvents: 0,
+      filteredOut: [],
+      foundEvents: []
+    };
+
+    console.log('[Event Auto Register] === LEMONADE SCRAPING STARTED ===');
+    
+    // Helper function to convert relative dates to absolute dates
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    
+    function resolveRelativeDate(text) {
+      const today = new Date();
+      const textLower = text.toLowerCase().trim();
+      
+      if (textLower.includes('tomorrow')) {
+        const tomorrow = new Date(today);
+        tomorrow.setDate(today.getDate() + 1);
+        return months[tomorrow.getMonth()] + ' ' + tomorrow.getDate();
+      }
+      if (textLower.includes('today')) {
+        return months[today.getMonth()] + ' ' + today.getDate();
+      }
+      if (textLower.includes('yesterday')) {
+        const yesterday = new Date(today);
+        yesterday.setDate(today.getDate() - 1);
+        return months[yesterday.getMonth()] + ' ' + yesterday.getDate();
+      }
+      
+      for (let i = 0; i < dayNames.length; i++) {
+        if (textLower.includes(dayNames[i].toLowerCase())) {
+          const targetDay = i;
+          const currentDay = today.getDay();
+          let daysUntil = targetDay - currentDay;
+          if (daysUntil <= 0) daysUntil += 7;
+          
+          const targetDate = new Date(today);
+          targetDate.setDate(today.getDate() + daysUntil);
+          return months[targetDate.getMonth()] + ' ' + targetDate.getDate();
+        }
+      }
+      return null;
+    }
+    
+    // Find date section headers
+    function findDateSections() {
+      const sections = [];
+      const headerElements = document.querySelectorAll('h2, h3, h4, div[class*="date"], div[class*="header"], div[class*="section"]');
+      
+      for (const el of headerElements) {
+        const text = (el.textContent || '').trim();
+        if (text.length > 30) continue;
+        
+        const resolved = resolveRelativeDate(text);
+        if (resolved) {
+          sections.push({ element: el, date: resolved, rect: el.getBoundingClientRect() });
+          continue;
+        }
+        
+        const absMatch = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+        if (absMatch) {
+          sections.push({ element: el, date: absMatch[0], rect: el.getBoundingClientRect() });
+        }
+      }
+      return sections;
+    }
+    
+    const dateSections = findDateSections();
+    
+    function getDateForElement(element) {
+      if (!dateSections.length) return null;
+      const rect = element.getBoundingClientRect();
+      let bestSection = null;
+      let bestDistance = Infinity;
+      
+      for (const section of dateSections) {
+        if (section.rect.bottom <= rect.top + 10) {
+          const distance = rect.top - section.rect.bottom;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestSection = section;
+          }
+        }
+      }
+      return bestSection ? bestSection.date : null;
+    }
+
+    // APPROACH 1: Check __NEXT_DATA__ for embedded event URLs (Next.js sites)
+    // Store real URLs in a lookup map for card matching later
+    const realUrlsBySlug = new Map();  // slug -> full URL
+    const nextDataScript = document.querySelector('script#__NEXT_DATA__');
+    if (nextDataScript) {
+      console.log('[Event Auto Register] Found __NEXT_DATA__ script, searching for event URLs...');
+      try {
+        const pageData = JSON.parse(nextDataScript.textContent);
+        const dataStr = nextDataScript.textContent;
+        
+        // Look for event URLs in the JSON string
+        const eventUrlPatterns = [
+          /lemonade\.social\/e\/([a-zA-Z0-9_-]+)/g,
+          /lemonade\.social\/event\/([a-zA-Z0-9_-]+)/g,
+          /lu\.ma\/([a-zA-Z0-9_-]+)(?=["',\s\}])/g
+        ];
+        
+        const foundUrls = new Set();
+        for (const pattern of eventUrlPatterns) {
+          let match;
+          while ((match = pattern.exec(dataStr)) !== null) {
+            const fullUrl = match[0].startsWith('http') ? match[0] : 'https://' + match[0];
+            foundUrls.add(fullUrl);
+          }
+        }
+        
+        debugInfo.nextDataEvents = foundUrls.size;
+        console.log('[Event Auto Register] Found ' + foundUrls.size + ' event URLs in __NEXT_DATA__');
+        
+        // Store URLs in lookup map for card matching - DON'T add as separate events yet
+        for (const url of foundUrls) {
+          const lemonadeMatch = url.match(/lemonade\.social\/(?:e|event)\/([a-zA-Z0-9_-]+)/);
+          const lumaMatch = url.match(/lu\.ma\/([a-zA-Z0-9_-]+)/);
+          
+          let eventId = '';
+          let platform = 'lemonade';
+          
+          if (lemonadeMatch) {
+            eventId = lemonadeMatch[1];
+          } else if (lumaMatch) {
+            eventId = lumaMatch[1];
+            platform = 'luma';
+          }
+          
+          if (eventId) {
+            // Store in lookup map for card matching
+            const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+            realUrlsBySlug.set(eventId.toLowerCase(), { url: fullUrl, platform: platform, eventId: eventId });
+          }
+        }
+        
+      } catch (e) {
+        console.log('[Event Auto Register] Error parsing __NEXT_DATA__:', e.message);
+      }
+    }
+
+    // APPROACH 2: Find event cards directly from DOM (no anchor tags needed)
+    // Lemonade uses React with divs that have specific class patterns for event cards
+    console.log('[Event Auto Register] Searching for event cards in DOM...');
+    
+    // Find cards by their distinctive class pattern
+    const cardSelectors = [
+      'div[class*="rounded-md"][class*="border-card"]',
+      'div[class*="event-card"]',
+      'div[class*="EventCard"]',
+      '[class*="card"][class*="bg-card"]'
+    ];
+    
+    let eventCards = [];
+    for (const selector of cardSelectors) {
+      try {
+        const cards = document.querySelectorAll(selector);
+        if (cards.length > 0) {
+          eventCards = Array.from(cards);
+          console.log('[Event Auto Register] Found ' + cards.length + ' cards with selector: ' + selector);
+          break;
+        }
+      } catch (e) {
+        // Invalid selector, try next
+      }
+    }
+    
+    // Fallback: find divs with date + event name patterns
+    if (eventCards.length === 0) {
+      console.log('[Event Auto Register] Trying fallback card detection...');
+      const allDivs = document.querySelectorAll('div');
+      const datePattern = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(at|@)\s+\d{1,2}:\d{2}\s*(AM|PM)/i;
+      
+      for (const div of allDivs) {
+        const text = div.textContent || '';
+        // Only consider divs with date/time pattern AND reasonable text length (not the whole page)
+        if (datePattern.test(text) && text.length < 500 && text.length > 20) {
+          // Make sure this is a leaf-ish card (not a container of many cards)
+          const innerCards = div.querySelectorAll('[class*="card"], [class*="Card"]');
+          if (innerCards.length === 0) {
+            eventCards.push(div);
+          }
+        }
+      }
+    }
+    
+    debugInfo.cardEvents = eventCards.length;
+    console.log('[Event Auto Register] Found ' + eventCards.length + ' potential event cards');
+    
+    // Process each card to extract event info
+    const seenTitles = new Set();
+    for (let i = 0; i < eventCards.length; i++) {
+      const card = eventCards[i];
+      const text = card.textContent || '';
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      
+      // Extract date - try multiple methods
+      let date = '';
+      
+      // First try: explicit date with time
+      const dateMatch = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:at|@)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?/i);
+      if (dateMatch) {
+        date = dateMatch[0];
+      }
+      
+      // Second try: just date without time
+      if (!date) {
+        const simpleDateMatch = text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+        if (simpleDateMatch) {
+          date = simpleDateMatch[0];
+        }
+      }
+      
+      // Third try: resolve relative dates (Tomorrow, Today, Saturday, etc.)
+      if (!date) {
+        const resolved = resolveRelativeDate(text);
+        if (resolved) date = resolved;
+      }
+      
+      // Fourth try: get from page section headers
+      if (!date) {
+        date = getDateForElement(card) || '';
+      }
+      
+      // Extract and append time if we have date from section but no time
+      const timeMatch = text.match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM)?)\b/i);
+      if (timeMatch && date && !date.includes(':')) {
+        date = date + ' at ' + timeMatch[1];
+      }
+      
+      // Extract title (first substantial line that's not date/location/organizer)
+      let title = '';
+      for (const line of lines) {
+        // Skip dates, times, locations, organizers
+        if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d/i.test(line)) continue;
+        if (/^\d{1,2}:\d{2}/.test(line)) continue;
+        if (/^By\s+/i.test(line)) continue;
+        if (/^(Free|Paid|External|Online|Virtual)$/i.test(line)) continue;
+        if (/^[A-Z]{2,}$/.test(line)) continue; // Skip country codes
+        if (/,\s*(UNITED STATES|USA|US)$/i.test(line)) continue;
+        if (line.length < 5) continue;
+        
+        // This is likely the title
+        title = line;
+        break;
+      }
+      
+      if (!title || title.length < 3) continue;
+      if (seenTitles.has(title)) continue;
+      seenTitles.add(title);
+      
+      // Try to find a URL - check for anchor inside or nearby, or in React props
+      let url = '';
+      let eventId = '';
+      
+      // Check if card has any anchor children
+      const innerLink = card.querySelector('a[href]');
+      if (innerLink) {
+        url = innerLink.href;
+      }
+      
+      // Check parent chain for links
+      if (!url) {
+        let parent = card.parentElement;
+        for (let p = 0; p < 3 && parent; p++) {
+          if (parent.tagName === 'A' && parent.href) {
+            url = parent.href;
+            break;
+          }
+          const parentLink = parent.querySelector(':scope > a[href]');
+          if (parentLink) {
+            url = parentLink.href;
+            break;
+          }
+          parent = parent.parentElement;
+        }
+      }
+      
+      // Try to extract event ID from React fiber or data attributes
+      if (!url) {
+        // Check for data attributes
+        const dataAttrs = card.dataset || {};
+        for (const key in dataAttrs) {
+          if (key.includes('event') || key.includes('id') || key.includes('slug')) {
+            eventId = dataAttrs[key];
+            break;
+          }
+        }
+        
+        // Try to match title to a real URL from __NEXT_DATA__
+        // Generate multiple possible slug formats to match against
+        const titleLower = title.toLowerCase().replace(/[^a-z0-9\s-]/g, '');
+        const possibleSlugs = [
+          titleLower.replace(/\s+/g, ''),       // "camp buidl" -> "campbuidl"
+          titleLower.replace(/\s+/g, '-'),      // "camp buidl" -> "camp-buidl"  
+          titleLower.replace(/\s+/g, '_'),      // "camp buidl" -> "camp_buidl"
+          titleLower.split(/\s+/)[0]            // Just first word
+        ];
+        
+        // Check if any of our generated slugs match a real URL
+        let matchedReal = null;
+        for (const slug of possibleSlugs) {
+          if (realUrlsBySlug.has(slug)) {
+            matchedReal = realUrlsBySlug.get(slug);
+            console.log('[Event Auto Register] Matched "' + title + '" to real URL: ' + matchedReal.url);
+            break;
+          }
+        }
+        
+        // Also try partial matching - check if any real slug contains our title words
+        if (!matchedReal) {
+          const titleWords = titleLower.split(/\s+/).filter(w => w.length > 2);
+          for (const [slug, data] of realUrlsBySlug.entries()) {
+            // Check if slug contains all significant words from title
+            const matches = titleWords.every(word => slug.includes(word));
+            if (matches) {
+              matchedReal = data;
+              console.log('[Event Auto Register] Partial match "' + title + '" to: ' + data.url);
+              break;
+            }
+          }
+        }
+        
+        if (matchedReal) {
+          url = matchedReal.url;
+          eventId = matchedReal.eventId;
+        } else if (!eventId) {
+          // Fallback: generate slug without dashes (more common on Lemonade)
+          eventId = titleLower.replace(/\s+/g, '').substring(0, 50);
+        }
+      }
+      
+      // If we still have no URL, construct from eventId
+      if (!url && eventId) {
+        url = 'https://lemonade.social/e/' + eventId;
+      }
+      
+      // Clean up title
+      title = title.replace(/\s+/g, ' ').trim();
+      if (title.length > 100) {
+        title = title.substring(0, 100) + '...';
+      }
+      
+      // Determine platform from URL
+      let platform = 'lemonade';
+      if (url.includes('lu.ma') || url.includes('luma.com')) {
+        platform = 'luma';
+        const lumaMatch = url.match(/(?:lu\.ma|luma\.com)\/([a-zA-Z0-9_-]+)/);
+        if (lumaMatch) eventId = lumaMatch[1];
+      } else if (url.includes('lemonade.social')) {
+        const lemMatch = url.match(/lemonade\.social\/(?:e|event)\/([a-zA-Z0-9_-]+)/);
+        if (lemMatch) eventId = lemMatch[1];
+      }
+      
+      // Only add if we have a URL (can't register without it)
+      if (url) {
+        events.push({
+          title: title,
+          url: url,
+          eventId: eventId || title.substring(0, 20),
+          date: date,
+          platform: platform
+        });
+        debugInfo.foundEvents.push({ title: title, url: url });
+        
+        if (i < 5) {
+          console.log('[Event Auto Register] Added event: ' + title + ' -> ' + url);
+        }
+      }
+    }
+
+    // APPROACH 3: Traditional anchor tag search (as fallback)
+    if (events.length === 0) {
+      console.log('[Event Auto Register] Trying traditional anchor tag search...');
+      const allLinks = document.querySelectorAll('a[href]');
+      debugInfo.totalLinks = allLinks.length;
+      
+      const eventPatterns = [
+        /lemonade\.social\/(e|event)\/([a-zA-Z0-9_-]+)/,
+        /lu\.ma\/([a-zA-Z0-9_-]+)/,
+        /luma\.com\/([a-zA-Z0-9_-]+)/
+      ];
+      
+      const excludePatterns = [
+        /lemonade\.social\/(s|space|profile|login|settings|discover)\//,
+        /lemonade\.social\/?$/,
+        /lu\.ma\/(calendar|profile|discover|create)\//,
+        /lu\.ma\/?$/
+      ];
+      
+      const seenUrls = new Set();
+      for (const link of allLinks) {
+        const href = link.href || '';
+        if (!href || seenUrls.has(href)) continue;
+        
+        let isEvent = false;
+        for (const pattern of eventPatterns) {
+          if (pattern.test(href)) {
+            isEvent = true;
+            break;
+          }
+        }
+        
+        if (isEvent) {
+          for (const pattern of excludePatterns) {
+            if (pattern.test(href)) {
+              isEvent = false;
+              break;
+            }
+          }
+        }
+        
+        if (isEvent) {
+          seenUrls.add(href);
+          const title = link.textContent?.trim() || 'Event';
+          events.push({
+            title: title.substring(0, 100),
+            url: href,
+            eventId: href.split('/').pop() || '',
+            date: '',
+            platform: href.includes('lu.ma') || href.includes('luma.com') ? 'luma' : 'lemonade'
+          });
+        }
+      }
+      debugInfo.eventLinks = events.length;
+    }
+
+    console.log('[Event Auto Register] === LEMONADE SCRAPING COMPLETE ===');
+    console.log('[Event Auto Register] Total events found: ' + events.length);
+
+    return {
+      events: events,
+      debug: debugInfo
+    };
+  }
+
+  // Legacy processing for events found via anchor tags (keeping for compatibility)
+  processLemonadeEventLinks(eventLinks, events, debugInfo) {
+    const seenUrls = new Set();
+    for (let index = 0; index < eventLinks.length; index++) {
+      const link = eventLinks[index];
+      const href = link.href;
+      if (seenUrls.has(href)) continue;
+      seenUrls.add(href);
+
+      if (index < 10) {
+        console.log('[Event Auto Register] Processing link ' + index + ': ' + href);
+      }
+
+      // Extract event ID from URL (works for both Lemonade and Luma URLs)
+      let eventId = '';
+      let platform = 'lemonade';
+      
+      const lemonadeMatch = href.match(/lemonade\.social\/(?:e|event)\/([a-zA-Z0-9_-]+)/);
+      const lumaMatch = href.match(/(?:lu\.ma|luma\.com)\/([a-zA-Z0-9_-]+)/);
+      
+      if (lemonadeMatch) {
+        eventId = lemonadeMatch[1];
+        platform = 'lemonade';
+      } else if (lumaMatch) {
+        eventId = lumaMatch[1];
+        platform = 'luma'; // This is a Luma event linked from Lemonade
+      } else {
+        // Generate ID from URL for other platforms
+        eventId = href.split('/').pop() || 'event-' + index;
+        platform = 'external';
+      }
+
+      // Get title and date from the surrounding card/container
+      let title = 'Event ' + eventId;
+      let date = '';
+
+      // Look for the closest card-like container
+      const parent = link.closest('div');
+      if (parent) {
+        // Get all text content and try to parse title and date
+        const fullText = parent.textContent || '';
+        const lines = fullText.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+        
+        // Try to find date (e.g., "Feb 16 at 11:00 AM")
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i.test(line)) {
+            date = line;
+            break;
+          }
+        }
+        
+        // Try to find title (usually a longer line that's not the date or location)
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          // Skip if it looks like a date, time, location, or tag
+          if (/^\d{1,2}:\d{2}/.test(line)) continue;
+          if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d/i.test(line)) continue;
+          if (/^By\s+/i.test(line)) continue;
+          if (/^(External|Free|Paid|Online|Virtual)$/i.test(line)) continue;
+          if (/UNITED STATES|Denver|Online/i.test(line) && line.length < 50) continue;
+          
+          // This might be the title
+          if (line.length > 10 && line.length < 200) {
+            title = line;
+            break;
+          }
+        }
+      }
+
+      // Fallback: try link text
+      if (title === 'Event ' + eventId && link.textContent.trim().length > 3) {
+        title = link.textContent.trim();
+      }
+
+      // Clean up title
+      title = title.replace(/\s+/g, ' ').trim();
+      title = title.split('\n')[0];
+      if (title.length > 100) {
+        title = title.substring(0, 100) + '...';
+      }
+
+      events.push({
+        title: title,
+        url: href,
+        eventId: eventId,
+        date: date,
+        platform: platform
+      });
+      debugInfo.foundEvents.push({ title: title, url: href, eventId: eventId, platform: platform });
+      if (index < 10) {
+        console.log('[Event Auto Register] Added: ' + title + ' (' + platform + ')');
+      }
+    }
   }
 
   async startRegistration(events, settings, senderWindowId = null) {
@@ -1356,9 +3339,31 @@ class RegistrationManager {
       // Update stats
       this.updateStats();
 
-      // Random delay between batches
+      // Check for batch break
+      const batchBreak = await this.shouldTakeBatchBreak();
+      if (batchBreak.shouldBreak) {
+        const breakMinutes = Math.round(batchBreak.duration / 60000);
+        this.sendLog('info', `📍 Taking a ${breakMinutes} minute break after ${this.stats.processed} registrations...`);
+        await this.sleep(batchBreak.duration);
+        this.sendLog('info', `✓ Break complete, resuming...`);
+      }
+
+      // Random delay between batches based on speed mode
       if (this.queue.length > 0) {
-        const delay = this.settings.delayBetween + Math.random() * 1000; // Reduced random component from 2000ms to 1000ms
+        // Check if any registration in the batch was successful
+        const hadSuccess = batch.some(event => event.status === 'success');
+        
+        // Use shorter delay for failed/manual events (no need to wait long since form already completed)
+        let delay;
+        if (hadSuccess) {
+          delay = await this.getRandomDelay();
+        } else {
+          // Reduced delay for failures - 40% of normal delay (min 2s)
+          const fullDelay = await this.getRandomDelay();
+          delay = Math.max(2000, Math.round(fullDelay * 0.4));
+        }
+        
+        this.sendLog('info', `  ⏱️ Waiting ${Math.round(delay/1000)}s before next registration...`);
         await this.sleep(delay);
       }
     }
@@ -1401,6 +3406,21 @@ class RegistrationManager {
       // Load user settings for auto-filling forms
       const settingsResult = await chrome.storage.local.get('userSettings');
       const userSettings = settingsResult.userSettings || {};
+
+      // Check if required settings are configured
+      if (!userSettings.firstName || !userSettings.lastName || !userSettings.email) {
+        const missing = [];
+        if (!userSettings.firstName) missing.push('First Name');
+        if (!userSettings.lastName) missing.push('Last Name');
+        if (!userSettings.email) missing.push('Email');
+        
+        this.sendLog('error', `Missing required settings: ${missing.join(', ')}. Please configure in extension settings.`);
+        return {
+          success: false,
+          message: `Missing required settings: ${missing.join(', ')}. Please open extension settings and fill in your information.`,
+          requiresManual: true
+        };
+      }
 
       // Determine which window to open tabs in
       // Always use the targetWindowId that was set when registration started
@@ -1478,19 +3498,6 @@ class RegistrationManager {
 
       this.sendLog('info', `  Tab opened: ${tab.id} in background window`);
 
-      // Ensure the background window doesn't steal focus after tab creation
-      // The window was created with focused: false, but we make sure it stays that way
-      if (windowId) {
-        setTimeout(async () => {
-          try {
-            // Update window to ensure it doesn't have focus
-            await chrome.windows.update(windowId, { focused: false });
-          } catch (error) {
-            // Window might be closed, ignore
-          }
-        }, 50); // Small delay to let tab creation complete
-      }
-
       // Wait for page to load
       await this.waitForTab(tab.id);
 
@@ -1500,11 +3507,10 @@ class RegistrationManager {
 
       this.sendLog('info', `  Injecting registration script...`);
 
-      // Create a timeout promise (8 seconds)
-      // This covers the full registration flow when there are no required questions
-      // (or nothing is actively being filled), which should be quick.
-      const REGISTRATION_TIMEOUT = 8000; // 8 seconds
-      const CLOUDFLARE_EXTENDED_TIMEOUT = 90000; // 90 seconds if Cloudflare detected (increased for verification)
+      // Create a timeout promise (15 seconds for focused mode)
+      // This covers the full registration flow when tab is focused
+      const REGISTRATION_TIMEOUT = 15000; // 15 seconds (focused mode - fast)
+      const CLOUDFLARE_EXTENDED_TIMEOUT = 90000; // 90 seconds if Cloudflare detected
 
       const timeoutPromise = new Promise((resolve) => {
         setTimeout(async () => {
@@ -1546,49 +3552,53 @@ class RegistrationManager {
         }, REGISTRATION_TIMEOUT);
       });
 
+      // Detect platform from event URL
+      const eventPlatform = this.detectPlatform(event.url);
+
       // Inject and execute registration with inline function
       // IMPORTANT: Run in the MAIN world so we can observe the page's own fetch()
       // requests (for accurate registration success detection).
       const registrationPromise = chrome.scripting.executeScript({
         target: { tabId: tab.id },
         world: 'MAIN',
-        args: [userSettings],
-        function: function (settings) {
+        args: [userSettings, eventPlatform],
+        function: function (settings, platform) {
           return new Promise(function (resolve) {
             try {
-              console.log('[Luma Auto Register] === REGISTRATION STARTED ===');
-              console.log('[Luma Auto Register] Settings received:');
-              console.log('[Luma Auto Register]   autoSelectFirstOption = ' + settings.autoSelectFirstOption + ' (type: ' + typeof settings.autoSelectFirstOption + ')');
-              console.log('[Luma Auto Register]   → ' + (settings.autoSelectFirstOption === false ? '🛡️ SAFE MODE: Will NOT auto-select first dropdown option' : '⚡ SPEED MODE: Will auto-select first dropdown option if no match'));
-              console.log('[Luma Auto Register]   autoAcceptTerms = ' + settings.autoAcceptTerms);
-              
+              console.log('[Event Auto Register] === REGISTRATION STARTED ===');
+              console.log('[Event Auto Register] Platform: ' + platform);
+              console.log('[Event Auto Register] Settings received:');
+              console.log('[Event Auto Register]   autoSelectFirstOption = ' + settings.autoSelectFirstOption + ' (type: ' + typeof settings.autoSelectFirstOption + ')');
+              console.log('[Event Auto Register]   → ' + (settings.autoSelectFirstOption === false ? '🛡️ SAFE MODE: Will NOT auto-select first dropdown option' : '⚡ SPEED MODE: Will auto-select first dropdown option if no match'));
+              console.log('[Event Auto Register]   autoAcceptTerms = ' + settings.autoAcceptTerms);
+
               // Reset network success flag for this registration attempt
               if (typeof window !== 'undefined') {
-                window.__lumaAutoRegisterNetworkSuccessFlag = false;
+                window.__eventAutoRegisterNetworkSuccessFlag = false;
 
                 // Patch fetch once to detect successful registration responses
                 try {
-                  if (!window.__lumaAutoRegisterFetchPatched && window.fetch) {
-                    window.__lumaAutoRegisterFetchPatched = true;
+                  if (!window.__eventAutoRegisterFetchPatched && window.fetch) {
+                    window.__eventAutoRegisterFetchPatched = true;
                     var originalFetch = window.fetch;
                     window.fetch = function () {
                       return originalFetch.apply(this, arguments).then(function (response) {
                         try {
                           var url = response && response.url ? response.url : '';
 
-                          // Detect direct registration responses
+                          // Luma-specific success detection
                           if (url.indexOf('/event/register') > -1) {
                             response.clone().json().then(function (data) {
                               try {
                                 if (data && (data.status === 'success' || data.approval_status === 'approved')) {
-                                  window.__lumaAutoRegisterNetworkSuccessFlag = true;
-                                  console.log('[Luma Auto Register] ✓ Network registration success detected (fetch /event/register)');
+                                  window.__eventAutoRegisterNetworkSuccessFlag = true;
+                                  console.log('[Event Auto Register] ✓ Network registration success detected (Luma /event/register)');
                                 }
                               } catch (e) { }
                             }).catch(function () { });
                           }
 
-                          // Also detect status responses that show current user as a guest
+                          // Also detect status responses that show current user as a guest (Luma)
                           if (url.indexOf('get?event_api_id=') > -1) {
                             response.clone().json().then(function (data) {
                               try {
@@ -1599,9 +3609,22 @@ class RegistrationManager {
                                   var isGuestRole = role && role.type === 'guest' && !!role.ticket_key;
 
                                   if (hasTicket || isGuestRole) {
-                                    window.__lumaAutoRegisterNetworkSuccessFlag = true;
-                                    console.log('[Luma Auto Register] ✓ Network registration success detected (fetch get?event_api_id) – user has ticket/guest role');
+                                    window.__eventAutoRegisterNetworkSuccessFlag = true;
+                                    console.log('[Event Auto Register] ✓ Network registration success detected (Luma get?event_api_id) – user has ticket/guest role');
                                   }
+                                }
+                              } catch (e) { }
+                            }).catch(function () { });
+                          }
+                          
+                          // Lemonade-specific success detection
+                          if (url.indexOf('lemonade.social') > -1 && 
+                              (url.indexOf('/register') > -1 || url.indexOf('/ticket') > -1 || url.indexOf('/rsvp') > -1)) {
+                            response.clone().json().then(function (data) {
+                              try {
+                                if (data && (data.success || data.status === 'success' || data.confirmed || data.ticket)) {
+                                  window.__eventAutoRegisterNetworkSuccessFlag = true;
+                                  console.log('[Event Auto Register] ✓ Network registration success detected (Lemonade)');
                                 }
                               } catch (e) { }
                             }).catch(function () { });
@@ -1612,7 +3635,7 @@ class RegistrationManager {
                     };
                   }
                 } catch (e) {
-                  console.log('[Luma Auto Register] Could not patch fetch for network success detection: ' + e.message);
+                  console.log('[Event Auto Register] Could not patch fetch for network success detection: ' + e.message);
                 }
               }
 
@@ -1620,10 +3643,10 @@ class RegistrationManager {
               try {
                 if (typeof document !== 'undefined' && document.body) {
                   // Avoid duplicating the overlay if for some reason the script runs twice
-                  if (!document.getElementById('__lumaAutoRegisterOverlay')) {
+                  if (!document.getElementById('__eventAutoRegisterOverlay')) {
                     // Create full-screen overlay background
                     var overlay = document.createElement('div');
-                    overlay.id = '__lumaAutoRegisterOverlay';
+                    overlay.id = '__eventAutoRegisterOverlay';
                     overlay.style.position = 'fixed';
                     overlay.style.left = '0';
                     overlay.style.top = '0';
@@ -1650,44 +3673,70 @@ class RegistrationManager {
                     box.style.zIndex = '2147483647'; // Highest z-index
                     box.style.textAlign = 'center';
                     box.style.lineHeight = '1.5';
-                    box.textContent = 'Luma Auto Register is filling this form. For best results, avoid editing fields until it finishes. To pause or stop, click the Luma Auto Register icon in Chrome\'s toolbar.';
+                    box.textContent = 'Event Auto Register is filling this form. For best results, avoid editing fields until it finishes. To pause or stop, click the extension icon in Chrome\'s toolbar.';
 
                     overlay.appendChild(box);
                     document.body.appendChild(overlay);
                   }
                 }
               } catch (overlayError) {
-                console.log('[Luma Auto Register] Could not show helper overlay: ' + overlayError.message);
+                console.log('[Event Auto Register] Could not show helper overlay: ' + overlayError.message);
               }
 
-              // Look for registration button - Luma uses specific text
-              var allButtons = document.querySelectorAll('button, a[role="button"], div[role="button"]');
-              console.log('[Luma Auto Register] Found ' + allButtons.length + ' buttons');
+              // Look for registration button - patterns vary by platform
+              var allButtons = document.querySelectorAll('button, a[role="button"], div[role="button"], [class*="button"], [class*="btn"]');
+              console.log('[Event Auto Register] Found ' + allButtons.length + ' buttons');
 
               var registerBtn = null;
+              
+              // Define button patterns based on platform
+              var buttonPatterns = [];
+              if (platform === 'lemonade') {
+                // Lemonade-specific patterns
+                buttonPatterns = [
+                  'get ticket',
+                  'get tickets',
+                  'claim ticket',
+                  'reserve',
+                  'register',
+                  'rsvp',
+                  'sign up',
+                  'join',
+                  'attend',
+                  'buy ticket'
+                ];
+              } else {
+                // Luma-specific patterns
+                buttonPatterns = [
+                  'one-click rsvp',
+                  'one-click apply',
+                  'request to join',
+                  'register',
+                  'rsvp',
+                  'join',
+                  'apply'
+                ];
+              }
+              
               for (var i = 0; i < allButtons.length; i++) {
                 var btn = allButtons[i];
-                var text = btn.textContent.trim();
+                var text = btn.textContent.trim().toLowerCase();
 
-                console.log('[Luma Auto Register] Button ' + i + ': "' + text + '"');
+                console.log('[Event Auto Register] Button ' + i + ': "' + btn.textContent.trim() + '"');
 
-                // Luma specific button texts
-                if (text === 'One-Click RSVP' ||
-                  text === 'One-Click Apply' ||
-                  text === 'Request to Join' ||
-                  text === 'Register' ||
-                  text.indexOf('RSVP') > -1 ||
-                  text.indexOf('Register') > -1 ||
-                  text.indexOf('Join') > -1 ||
-                  text.indexOf('Apply') > -1) {
-                  registerBtn = btn;
-                  console.log('[Luma Auto Register] ✓ Found register button: "' + text + '"');
-                  break;
+                // Check against platform-specific patterns
+                for (var p = 0; p < buttonPatterns.length; p++) {
+                  if (text.indexOf(buttonPatterns[p]) > -1) {
+                    registerBtn = btn;
+                    console.log('[Event Auto Register] ✓ Found register button: "' + btn.textContent.trim() + '"');
+                    break;
+                  }
                 }
+                if (registerBtn) break;
               }
 
               if (!registerBtn) {
-                console.log('[Luma Auto Register] No register button found, checking status...');
+                console.log('[Event Auto Register] No register button found, checking status...');
                 var bodyText = document.body.textContent || '';
                 var bodyTextLower = bodyText.toLowerCase();
 
@@ -1704,7 +3753,7 @@ class RegistrationManager {
                   // mentions elsewhere on the page (e.g. "subscribe for free") because
                   // they don't change the fact that tickets cost money.
                   if (hasMoney) {
-                    console.log('[Luma Auto Register] ⚠️ Paid tickets detected (no free registration button) - requiring manual review.');
+                    console.log('[Event Auto Register] ⚠️ Paid tickets detected (no free registration button) - requiring manual review.');
                     resolve({
                       success: false,
                       requiresManual: true,
@@ -1713,26 +3762,47 @@ class RegistrationManager {
                     return;
                   }
                 } catch (paidDetectError) {
-                  console.log('[Luma Auto Register] Error while detecting paid event (no button case): ' + paidDetectError.message);
+                  console.log('[Event Auto Register] Error while detecting paid event (no button case): ' + paidDetectError.message);
                 }
 
-                // Check if already registered
-                if (bodyText.indexOf("You're going") > -1 ||
-                  bodyText.indexOf("You're registered") > -1 ||
-                  bodyText.indexOf("You're In") > -1 ||
-                  bodyText.indexOf("You're in") > -1 ||
-                  bodyText.indexOf("Already registered") > -1 ||
-                  bodyText.indexOf("Request pending") > -1 ||
-                  bodyText.indexOf("Approval pending") > -1 ||
-                  bodyText.indexOf("Pending Approval") > -1 ||
-                  bodyText.indexOf("pending approval") > -1 ||
-                  bodyText.indexOf("You're on the Waitlist") > -1 ||
-                  bodyText.indexOf("You're on the waitlist") > -1 ||
-                  bodyText.indexOf("on the Waitlist") > -1 ||
-                  bodyText.indexOf("on the waitlist") > -1 ||
-                  bodyTextLower.indexOf("thank you for joining") > -1 ||
-                  bodyTextLower.indexOf("thanks for joining") > -1) {
-                  console.log('[Luma Auto Register] ✓ Already registered, pending approval, or on waitlist!');
+                // Check if already registered - platform-aware patterns
+                var alreadyRegisteredPatterns = [
+                  // Common patterns
+                  "you're going",
+                  "you're registered",
+                  "you're in",
+                  "already registered",
+                  "request pending",
+                  "approval pending",
+                  "pending approval",
+                  "on the waitlist",
+                  "thank you for joining",
+                  "thanks for joining"
+                ];
+                
+                // Add Lemonade-specific patterns
+                if (platform === 'lemonade') {
+                  alreadyRegisteredPatterns = alreadyRegisteredPatterns.concat([
+                    "ticket confirmed",
+                    "registration confirmed",
+                    "registration successful",
+                    "you have a ticket",
+                    "your ticket",
+                    "checked in",
+                    "check-in"
+                  ]);
+                }
+                
+                var isAlreadyRegistered = false;
+                for (var p = 0; p < alreadyRegisteredPatterns.length; p++) {
+                  if (bodyTextLower.indexOf(alreadyRegisteredPatterns[p]) > -1) {
+                    isAlreadyRegistered = true;
+                    break;
+                  }
+                }
+                
+                if (isAlreadyRegistered) {
+                  console.log('[Event Auto Register] ✓ Already registered, pending approval, or on waitlist!');
                   resolve({ success: true, message: 'Already registered, pending approval, or on waitlist' });
                   return;
                 }
@@ -1750,7 +3820,7 @@ class RegistrationManager {
                     var hasMoney2 = paidPattern2.test(bodyTextUpper2);
 
                     if (hasMoney2) {
-                      console.log('[Luma Auto Register] ⚠️ Event has paid tickets and shows \"Sold Out\" text - treating as paid/manual, not generic full.');
+                      console.log('[Event Auto Register] ⚠️ Event has paid tickets and shows \"Sold Out\" text - treating as paid/manual, not generic full.');
                       resolve({
                         success: false,
                         requiresManual: true,
@@ -1759,15 +3829,15 @@ class RegistrationManager {
                       return;
                     }
                   } catch (paidFullError) {
-                    console.log('[Luma Auto Register] Error while refining full/paid detection: ' + paidFullError.message);
+                    console.log('[Event Auto Register] Error while refining full/paid detection: ' + paidFullError.message);
                   }
 
-                  console.log('[Luma Auto Register] ✗ Event is full');
+                  console.log('[Event Auto Register] ✗ Event is full');
                   resolve({ success: false, message: 'Event is full' });
                   return;
                 }
 
-                console.log('[Luma Auto Register] ✗ No register button found');
+                console.log('[Event Auto Register] ✗ No register button found');
                 resolve({ success: false, message: 'Registration button not found' });
                 return;
               }
@@ -1796,7 +3866,7 @@ class RegistrationManager {
                 }
 
                 if (paidEventDetected) {
-                  console.log('[Luma Auto Register] ⚠️ Paid event detected near register button - requiring manual review (no auto-registration).');
+                  console.log('[Event Auto Register] ⚠️ Paid event detected near register button - requiring manual review (no auto-registration).');
                   resolve({
                     success: false,
                     requiresManual: true,
@@ -1805,12 +3875,12 @@ class RegistrationManager {
                   return;
                 }
               } catch (paidError) {
-                console.log('[Luma Auto Register] Error while detecting paid event: ' + paidError.message);
+                console.log('[Event Auto Register] Error while detecting paid event: ' + paidError.message);
               }
 
               // Click the register button
               var buttonText = registerBtn.textContent.trim();
-              console.log('[Luma Auto Register] Clicking: "' + buttonText + '"');
+              console.log('[Event Auto Register] Clicking: "' + buttonText + '"');
 
               // Check if this is a One-Click RSVP (no form needed)
               var isOneClickRSVP = buttonText === 'One-Click RSVP' || buttonText === 'One-Click Apply';
@@ -1819,12 +3889,12 @@ class RegistrationManager {
 
               // For One-Click RSVP, skip form processing and check for success directly
               if (isOneClickRSVP) {
-                console.log('[Luma Auto Register] One-Click RSVP detected - skipping form processing');
-                console.log('[Luma Auto Register] Waiting for registration to complete...');
+                console.log('[Event Auto Register] One-Click RSVP detected - skipping form processing');
+                console.log('[Event Auto Register] Waiting for registration to complete...');
 
                 // Wait for page to update after click - give more time for React to render
                 setTimeout(function () {
-                  console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT (One-Click RSVP) ===');
+                  console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT (One-Click RSVP) ===');
 
                   // Check for success messages with multiple attempts
                   var checkForSuccess = function () {
@@ -1884,17 +3954,17 @@ class RegistrationManager {
                       bodyTextLower.indexOf("already registered") > -1; // Also check for "already registered" message
 
                     // Fallback: trust network success flag if DOM hasn't updated yet
-                    if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                      console.log('[Luma Auto Register] Success inferred from network response (One-Click RSVP)');
+                    if (!success && typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                      console.log('[Event Auto Register] Success inferred from network response (One-Click RSVP)');
                       success = true;
                     }
 
-                    console.log('[Luma Auto Register] Success check - bodyText length: ' + bodyText.length + ', found success: ' + success);
+                    console.log('[Event Auto Register] Success check - bodyText length: ' + bodyText.length + ', found success: ' + success);
                     if (bodyText.length > 0 && bodyText.length < 500) {
-                      console.log('[Luma Auto Register] Page text preview: ' + bodyText.substring(0, 300));
+                      console.log('[Event Auto Register] Page text preview: ' + bodyText.substring(0, 300));
                     }
                     if (elementText.length > 0) {
-                      console.log('[Luma Auto Register] Success element text: ' + elementText.substring(0, 200));
+                      console.log('[Event Auto Register] Success element text: ' + elementText.substring(0, 200));
                     }
 
                     return { success: success, bodyText: bodyText, bodyHTML: bodyHTML };
@@ -1903,7 +3973,7 @@ class RegistrationManager {
                   // First check after 4 seconds (increased to give React more time to render)
                   var result1 = checkForSuccess();
                   if (result1.success) {
-                    console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (One-Click RSVP - first check)');
+                    console.log('[Event Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (One-Click RSVP - first check)');
                     resolve({
                       success: true,
                       message: 'Registered successfully via One-Click RSVP'
@@ -1911,13 +3981,13 @@ class RegistrationManager {
                     return;
                   }
 
-                  console.log('[Luma Auto Register] First check failed, waiting for second check...');
+                  console.log('[Event Auto Register] First check failed, waiting for second check...');
 
                   // Second check after 3 more seconds
                   setTimeout(function () {
                     var result2 = checkForSuccess();
                     if (result2.success) {
-                      console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (One-Click RSVP - second check)');
+                      console.log('[Event Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (One-Click RSVP - second check)');
                       resolve({
                         success: true,
                         message: 'Registered successfully via One-Click RSVP'
@@ -1925,21 +3995,21 @@ class RegistrationManager {
                       return;
                     }
 
-                    console.log('[Luma Auto Register] Second check failed, waiting for third check...');
+                    console.log('[Event Auto Register] Second check failed, waiting for third check...');
 
                     // Third check after 3 more seconds
                     setTimeout(function () {
                       var result3 = checkForSuccess();
                       if (result3.success) {
-                        console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (One-Click RSVP - third check)');
+                        console.log('[Event Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (One-Click RSVP - third check)');
                         resolve({
                           success: true,
                           message: 'Registered successfully via One-Click RSVP'
                         });
                       } else {
-                        console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (One-Click RSVP)');
-                        console.log('[Luma Auto Register] Page text sample: ' + (result3.bodyText || '').substring(0, 500));
-                        console.log('[Luma Auto Register] Page HTML sample: ' + (result3.bodyHTML || '').substring(0, 500));
+                        console.log('[Event Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (One-Click RSVP)');
+                        console.log('[Event Auto Register] Page text sample: ' + (result3.bodyText || '').substring(0, 500));
+                        console.log('[Event Auto Register] Page HTML sample: ' + (result3.bodyHTML || '').substring(0, 500));
                         resolve({
                           success: false,
                           message: 'Could not confirm registration - please check manually'
@@ -1956,10 +4026,10 @@ class RegistrationManager {
               // Use polling to wait for form to actually appear
               var waitForForm = function (attempts, maxAttempts) {
                 attempts = attempts || 0;
-                maxAttempts = maxAttempts || 30; // Try for up to 15 seconds (30 attempts * 500ms) - increased for slower loading forms
+                maxAttempts = maxAttempts || 20; // Try for up to 10 seconds (20 attempts * 500ms) - focused mode
 
-                console.log('[Luma Auto Register] === FORM PROCESSING STARTED (attempt ' + (attempts + 1) + ') ===');
-                console.log('[Luma Auto Register] Checking for registration form...');
+                console.log('[Event Auto Register] === FORM PROCESSING STARTED (attempt ' + (attempts + 1) + ') ===');
+                console.log('[Event Auto Register] Checking for registration form...');
 
                 // Look for form in modals/dialogs first, then in document
                 var formContainer = null;
@@ -1980,7 +4050,7 @@ class RegistrationManager {
                 // Check modals first
                 for (var ms = 0; ms < modalSelectors.length; ms++) {
                   var modals = document.querySelectorAll(modalSelectors[ms]);
-                  console.log('[Luma Auto Register] Checking ' + modals.length + ' elements matching: ' + modalSelectors[ms]);
+                  console.log('[Event Auto Register] Checking ' + modals.length + ' elements matching: ' + modalSelectors[ms]);
                   for (var m = 0; m < modals.length; m++) {
                     var modal = modals[m];
                     // Check if modal is actually visible (or check display style)
@@ -2007,10 +4077,10 @@ class RegistrationManager {
 
                       if (visibleInputs.length > 0) {
                         formContainer = modal;
-                        console.log('[Luma Auto Register] ✓ Found form in modal: ' + modalSelectors[ms] + ' with ' + visibleInputs.length + ' visible inputs (out of ' + inputsInModal.length + ' total)');
+                        console.log('[Event Auto Register] ✓ Found form in modal: ' + modalSelectors[ms] + ' with ' + visibleInputs.length + ' visible inputs (out of ' + inputsInModal.length + ' total)');
                         break;
                       } else if (inputsInModal.length > 0) {
-                        console.log('[Luma Auto Register] Found modal with ' + inputsInModal.length + ' inputs but none are visible yet');
+                        console.log('[Event Auto Register] Found modal with ' + inputsInModal.length + ' inputs but none are visible yet');
                       }
                     }
                   }
@@ -2037,14 +4107,14 @@ class RegistrationManager {
                   for (var lfs = 0; lfs < lumaFormSelectors.length; lfs++) {
                     var lumaForms = document.querySelectorAll(lumaFormSelectors[lfs]);
                     if (lumaForms.length > 0) {
-                      console.log('[Luma Auto Register] Found ' + lumaForms.length + ' Luma form elements matching: ' + lumaFormSelectors[lfs]);
+                      console.log('[Event Auto Register] Found ' + lumaForms.length + ' Luma form elements matching: ' + lumaFormSelectors[lfs]);
                       // Check if any have inputs
                       for (var lf = 0; lf < lumaForms.length; lf++) {
                         var lumaForm = lumaForms[lf];
                         var lumaInputs = lumaForm.querySelectorAll('input, textarea, select, [contenteditable="true"]');
                         if (lumaInputs.length > 0) {
                           formContainer = lumaForm;
-                          console.log('[Luma Auto Register] ✓ Found Luma form with ' + lumaInputs.length + ' inputs');
+                          console.log('[Event Auto Register] ✓ Found Luma form with ' + lumaInputs.length + ' inputs');
                           break;
                         }
                       }
@@ -2068,9 +4138,9 @@ class RegistrationManager {
                     for (var lis = 0; lis < lumaInputSelectors.length; lis++) {
                       var lumaInputElements = document.querySelectorAll(lumaInputSelectors[lis]);
                       if (lumaInputElements.length > 0) {
-                        console.log('[Luma Auto Register] Found ' + lumaInputElements.length + ' inputs matching: ' + lumaInputSelectors[lis]);
+                        console.log('[Event Auto Register] Found ' + lumaInputElements.length + ' inputs matching: ' + lumaInputSelectors[lis]);
                         formContainer = lumaInputElements[0].closest('form') || lumaInputElements[0].closest('[class*="modal"]') || document.body;
-                        console.log('[Luma Auto Register] ✓ Found form container via Luma input selector');
+                        console.log('[Event Auto Register] ✓ Found form container via Luma input selector');
                         break;
                       }
                     }
@@ -2079,7 +4149,7 @@ class RegistrationManager {
                 
                 if (!formContainer) {
                   var allInputs = document.querySelectorAll('input, textarea, select');
-                  console.log('[Luma Auto Register] Checking ' + allInputs.length + ' total inputs in document');
+                  console.log('[Event Auto Register] Checking ' + allInputs.length + ' total inputs in document');
                   if (allInputs.length > 0) {
                     // Check if any are visible
                     var visibleCount = 0;
@@ -2092,13 +4162,13 @@ class RegistrationManager {
                           visibleCount++;
                           if (!formContainer) {
                             formContainer = document.body;
-                            console.log('[Luma Auto Register] Found visible form inputs in document body');
+                            console.log('[Event Auto Register] Found visible form inputs in document body');
                           }
                         }
                       }
                     }
                     if (visibleCount > 0) {
-                      console.log('[Luma Auto Register] Found ' + visibleCount + ' visible inputs in document');
+                      console.log('[Event Auto Register] Found ' + visibleCount + ' visible inputs in document');
                     }
                   }
 
@@ -2137,7 +4207,7 @@ class RegistrationManager {
                           associatedInput.tagName.toLowerCase() === 'textarea' ||
                           associatedInput.tagName.toLowerCase() === 'select')) {
                           formContainer = document.body;
-                          console.log('[Luma Auto Register] Found form by label text: "' + label.textContent.substring(0, 50) + '"');
+                          console.log('[Event Auto Register] Found form by label text: "' + label.textContent.substring(0, 50) + '"');
                           break;
                         }
                       }
@@ -2149,7 +4219,7 @@ class RegistrationManager {
                 if (!formContainer) {
                   try {
                     var iframes = document.querySelectorAll('iframe');
-                    console.log('[Luma Auto Register] Checking ' + iframes.length + ' iframes for form inputs');
+                    console.log('[Event Auto Register] Checking ' + iframes.length + ' iframes for form inputs');
                     for (var ifi = 0; ifi < iframes.length; ifi++) {
                       try {
                         var iframe = iframes[ifi];
@@ -2158,7 +4228,7 @@ class RegistrationManager {
                           var iframeInputs = iframeDoc.querySelectorAll('input, textarea, select');
                           if (iframeInputs.length > 0) {
                             formContainer = iframeDoc.body;
-                            console.log('[Luma Auto Register] Found form in iframe with ' + iframeInputs.length + ' inputs');
+                            console.log('[Event Auto Register] Found form in iframe with ' + iframeInputs.length + ' inputs');
                             break;
                           }
                         }
@@ -2167,13 +4237,13 @@ class RegistrationManager {
                       }
                     }
                   } catch (e) {
-                    console.log('[Luma Auto Register] Could not check iframes: ' + e.message);
+                    console.log('[Event Auto Register] Could not check iframes: ' + e.message);
                   }
                 }
 
                 // If form not found and we haven't exceeded max attempts, wait and try again
                 if (!formContainer && attempts < maxAttempts) {
-                  console.log('[Luma Auto Register] Form not found yet, waiting 500ms before retry... (found ' + document.querySelectorAll('input, textarea, select').length + ' total inputs in DOM)');
+                  console.log('[Event Auto Register] Form not found yet, waiting 500ms before retry... (found ' + document.querySelectorAll('input, textarea, select').length + ' total inputs in DOM)');
                   setTimeout(function () {
                     waitForForm(attempts + 1, maxAttempts);
                   }, 500);
@@ -2182,9 +4252,9 @@ class RegistrationManager {
 
                 // If still no form after max attempts, proceed anyway (might be a different flow)
                 if (!formContainer) {
-                  console.log('[Luma Auto Register] ⚠️ Form not found after ' + maxAttempts + ' attempts, proceeding anyway...');
+                  console.log('[Event Auto Register] ⚠️ Form not found after ' + maxAttempts + ' attempts, proceeding anyway...');
 
-                  console.log('[Luma Auto Register] Debug: Found ' + document.querySelectorAll('input, textarea, select').length + ' total inputs, ' +
+                  console.log('[Event Auto Register] Debug: Found ' + document.querySelectorAll('input, textarea, select').length + ' total inputs, ' +
                     document.querySelectorAll('[role="dialog"]').length + ' dialogs, ' +
                     document.querySelectorAll('.modal, [class*="modal"]').length + ' modals');
                   
@@ -2205,10 +4275,10 @@ class RegistrationManager {
                     'form': document.querySelectorAll('form').length,
                     'button': document.querySelectorAll('button').length
                   };
-                  console.log('[Luma Auto Register] Extended debug - element counts:');
+                  console.log('[Event Auto Register] Extended debug - element counts:');
                   for (var ds in debugSelectors) {
                     if (debugSelectors[ds] > 0) {
-                      console.log('[Luma Auto Register]   ' + ds + ': ' + debugSelectors[ds]);
+                      console.log('[Event Auto Register]   ' + ds + ': ' + debugSelectors[ds]);
                     }
                   }
                   
@@ -2229,15 +4299,15 @@ class RegistrationManager {
                     }
                   }
                   if (nameElements.length > 0) {
-                    console.log('[Luma Auto Register] Elements containing "name": ' + nameElements.slice(0, 5).join(', '));
+                    console.log('[Event Auto Register] Elements containing "name": ' + nameElements.slice(0, 5).join(', '));
                   }
                   if (emailElements.length > 0) {
-                    console.log('[Luma Auto Register] Elements containing "email": ' + emailElements.slice(0, 5).join(', '));
+                    console.log('[Event Auto Register] Elements containing "email": ' + emailElements.slice(0, 5).join(', '));
                   }
                   
                   // Check document URL and title
-                  console.log('[Luma Auto Register] Page URL: ' + window.location.href);
-                  console.log('[Luma Auto Register] Page title: ' + document.title);
+                  console.log('[Event Auto Register] Page URL: ' + window.location.href);
+                  console.log('[Event Auto Register] Page title: ' + document.title);
                   
                   formContainer = document.body; // Use document body as fallback
                 }
@@ -2247,7 +4317,7 @@ class RegistrationManager {
               };
 
               // Start waiting for form (will call processForm when found)
-              waitForForm(0, 10);
+              waitForForm(0, 20); // 20 attempts * 500ms = 10 seconds (focused mode)
 
               // Form processing function (called after form is found)
               function processForm(formContainer) {
@@ -2255,7 +4325,7 @@ class RegistrationManager {
                 var handleTermsModal = function (callback) {
                   // Check if we've already handled the terms modal
                   if (typeof window !== 'undefined' && window.__lumaTermsModalHandled) {
-                    console.log('[Luma Auto Register] Terms modal already handled, skipping duplicate check...');
+                    console.log('[Event Auto Register] Terms modal already handled, skipping duplicate check...');
                     return false;
                   }
 
@@ -2288,7 +4358,7 @@ class RegistrationManager {
                         (modalText.indexOf('type') > -1 && modalText.indexOf('name') > -1 && modalText.indexOf('agree') > -1) ||
                         (modalText.indexOf('confirm') > -1 && modalText.indexOf('agree') > -1)) {
                         termsModal = modal;
-                        console.log('[Luma Auto Register] Found terms modal via text match: "' + (modalText.substring(0, 100)) + '"');
+                        console.log('[Event Auto Register] Found terms modal via text match: "' + (modalText.substring(0, 100)) + '"');
                         break;
                       }
                     }
@@ -2313,7 +4383,7 @@ class RegistrationManager {
                           var parentText = (parent.textContent || '').toLowerCase();
                           if (parentText.indexOf('accept') > -1 || parentText.indexOf('terms') > -1) {
                             termsModal = parent;
-                            console.log('[Luma Auto Register] Found terms modal via button parent');
+                            console.log('[Event Auto Register] Found terms modal via button parent');
                             break;
                           }
                           // Check if parent matches modal selectors
@@ -2321,7 +4391,7 @@ class RegistrationManager {
                             try {
                               if (parent.matches && parent.matches(modalSelectors[ms2])) {
                                 termsModal = parent;
-                                console.log('[Luma Auto Register] Found terms modal via button parent selector');
+                                console.log('[Event Auto Register] Found terms modal via button parent selector');
                                 break;
                               }
                             } catch (e) { }
@@ -2334,7 +4404,7 @@ class RegistrationManager {
                   }
 
                   if (termsModal) {
-                    console.log('[Luma Auto Register] Terms modal found, handling it...');
+                    console.log('[Event Auto Register] Terms modal found, handling it...');
                     // Mark that we're handling it to prevent duplicates
                     if (typeof window !== 'undefined') {
                       window.__lumaTermsModalHandled = true;
@@ -2379,9 +4449,9 @@ class RegistrationManager {
                     }
 
                     if (nameInput) {
-                      console.log('[Luma Auto Register] Found name input in terms modal: type=' + (nameInput.type || 'text') + ', placeholder=' + (nameInput.placeholder || 'none'));
+                      console.log('[Event Auto Register] Found name input in terms modal: type=' + (nameInput.type || 'text') + ', placeholder=' + (nameInput.placeholder || 'none'));
                     } else {
-                      console.log('[Luma Auto Register] ⚠️ Could not find name input in terms modal');
+                      console.log('[Event Auto Register] ⚠️ Could not find name input in terms modal');
                     }
 
                     if (nameInput) {
@@ -2398,14 +4468,14 @@ class RegistrationManager {
                       }
 
                       if (fullName) {
-                        console.log('[Luma Auto Register] Filling name in terms modal: "' + fullName + '"');
+                        console.log('[Event Auto Register] Filling name in terms modal: "' + fullName + '"');
                         // Use the same character-by-character typing as the main handler
                         nameInput.focus();
                         nameInput.value = '';
 
                         (function typeName(index) {
                           if (index >= fullName.length) {
-                            console.log('[Luma Auto Register] ✓ Finished typing name in helper');
+                            console.log('[Event Auto Register] ✓ Finished typing name in helper');
                             nameInput.dispatchEvent(new Event('input', { bubbles: true }));
                             nameInput.dispatchEvent(new Event('change', { bubbles: true }));
                             nameInput.blur();
@@ -2426,10 +4496,10 @@ class RegistrationManager {
                               }
 
                               if (signBtn && !signBtn.disabled && signBtn.offsetParent) {
-                                console.log('[Luma Auto Register] Clicking "Sign & Accept" button (helper)');
+                                console.log('[Event Auto Register] Clicking "Sign & Accept" button (helper)');
                                 signBtn.click();
                                 signBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                console.log('[Luma Auto Register] ✓ Terms modal signed and accepted (helper)');
+                                console.log('[Event Auto Register] ✓ Terms modal signed and accepted (helper)');
 
                                 if (callback) {
                                   setTimeout(function () {
@@ -2437,7 +4507,7 @@ class RegistrationManager {
                                   }, 1000);
                                 }
                               } else {
-                                console.log('[Luma Auto Register] ⚠️ Could not find or click "Sign & Accept" button (helper)');
+                                console.log('[Event Auto Register] ⚠️ Could not find or click "Sign & Accept" button (helper)');
                                 if (callback) callback();
                               }
                             }, 300);
@@ -2491,7 +4561,7 @@ class RegistrationManager {
                     }
 
                     if (wasUnchecked) {
-                      console.log('[Luma Auto Register] ⚠️ ' + desc + ' was unchecked! Re-checking immediately...');
+                      console.log('[Event Auto Register] ⚠️ ' + desc + ' was unchecked! Re-checking immediately...');
 
                       // Immediately re-check it using the same strategies
                       var labelEl = checkbox.closest('label') ||
@@ -2523,9 +4593,9 @@ class RegistrationManager {
                           // Ignore
                         }
 
-                        console.log('[Luma Auto Register] ✓ ' + desc + ' re-checked (watcher)');
+                        console.log('[Event Auto Register] ✓ ' + desc + ' re-checked (watcher)');
                       } catch (e) {
-                        console.log('[Luma Auto Register] Error re-checking checkbox: ' + e.message);
+                        console.log('[Event Auto Register] Error re-checking checkbox: ' + e.message);
                       }
                     }
                   });
@@ -2540,7 +4610,7 @@ class RegistrationManager {
                   // Also poll the checked property periodically (as backup)
                   var pollInterval = setInterval(function () {
                     if (!checkbox.checked && checkbox.offsetParent !== null) {
-                      console.log('[Luma Auto Register] ⚠️ ' + desc + ' unchecked (poll detected), re-checking...');
+                      console.log('[Event Auto Register] ⚠️ ' + desc + ' unchecked (poll detected), re-checking...');
                       try {
                         var labelEl2 = checkbox.closest('label') ||
                           document.querySelector('label[for="' + (checkbox.id || '') + '"]');
@@ -2580,13 +4650,13 @@ class RegistrationManager {
                   var desc = description || 'checkbox';
 
                   if (checkbox.checked) {
-                    console.log('[Luma Auto Register] ✓ ' + desc + ' already checked (helper)');
+                    console.log('[Event Auto Register] ✓ ' + desc + ' already checked (helper)');
                     // Even if already checked, set up a watcher to keep it checked
                     setupCheckboxWatcher(checkbox, desc);
                     return;
                   }
 
-                  console.log('[Luma Auto Register] Attempting to check ' + desc + ' via helper...');
+                  console.log('[Event Auto Register] Attempting to check ' + desc + ' via helper...');
 
                   // Set up a watcher to keep the checkbox checked if something tries to uncheck it
                   setupCheckboxWatcher(checkbox, desc);
@@ -2664,28 +4734,29 @@ class RegistrationManager {
                   // Try multiple click targets in order of preference
                   var clickTargets = [];
 
-                  // Priority 1: Visual checkbox element (if found)
-                  if (visualCheckbox && visualCheckbox.offsetParent) {
-                    clickTargets.push(visualCheckbox);
-                  }
+                  // PRIORITY 1: The checkbox INPUT element itself (most important for React!)
+                  // React's synthetic event handlers are attached to the actual input
+                  clickTargets.push(checkbox);
 
-                  // Priority 2: Label element
+                  // Priority 2: Label element (labels are designed to toggle checkboxes)
                   if (labelEl && labelEl.offsetParent) {
                     clickTargets.push(labelEl);
                   }
 
-                  // Priority 3: Wrapper with checkbox role/class
+                  // Priority 3: Visual checkbox element (div/span with checkbox styling)
+                  if (visualCheckbox && visualCheckbox.offsetParent) {
+                    clickTargets.push(visualCheckbox);
+                  }
+
+                  // Priority 4: Wrapper with checkbox role/class
                   if (wrapperTarget && wrapperTarget.offsetParent) {
                     clickTargets.push(wrapperTarget);
                   }
 
-                  // Priority 4: Parent element (if it contains the checkbox)
+                  // Priority 5: Parent element (if it contains the checkbox)
                   if (parent && parent.offsetParent && parent !== document.body) {
                     clickTargets.push(parent);
                   }
-
-                  // Priority 5: The checkbox element itself
-                  clickTargets.push(checkbox);
 
                   // Try each target until one works
                   var checked = false;
@@ -2716,7 +4787,15 @@ class RegistrationManager {
                       // First, try React's synthetic event by using the native click
                       target.click(); // This triggers React's synthetic events
 
-                      // Also dispatch native events for compatibility
+                      // IMPORTANT: If checkbox is already checked after click(), don't dispatch more events
+                      // Multiple click events can toggle it back off!
+                      if (checkbox.checked) {
+                        checked = true;
+                        console.log('[Event Auto Register] ✓ ' + desc + ' checked via target.click() on ' + (target.tagName || 'unknown'));
+                        break;
+                      }
+
+                      // Only dispatch additional events if the first click didn't work
                       target.dispatchEvent(mouseDown);
                       target.dispatchEvent(mouseUp);
                       target.dispatchEvent(clickEvent);
@@ -2758,23 +4837,30 @@ class RegistrationManager {
                       // The watcher will handle if it gets unchecked
                       if (checkbox.checked) {
                         checked = true;
-                        console.log('[Luma Auto Register] ✓ ' + desc + ' checked via target ' + t + ' (' + (target.tagName || 'unknown') + ')');
+                        console.log('[Event Auto Register] ✓ ' + desc + ' checked via target ' + t + ' (' + (target.tagName || 'unknown') + ')');
                         break;
                       }
                     } catch (e) {
-                      console.log('[Luma Auto Register] Error clicking target ' + t + ': ' + e.message);
+                      console.log('[Event Auto Register] Error clicking target ' + t + ': ' + e.message);
                     }
                   }
 
                   // Final fallback: Directly set checked and dispatch events
                   if (!checkbox.checked) {
-                    // Set the property directly
+                    // REACT FIX: Reset _valueTracker BEFORE setting checked so React detects the change
                     try {
-                      Object.defineProperty(checkbox, 'checked', {
-                        value: true,
-                        writable: true,
-                        configurable: true
-                      });
+                      if (checkbox._valueTracker) {
+                        // Reset tracker to empty string so React thinks state changed
+                        checkbox._valueTracker.setValue('');
+                      }
+                    } catch (err) {
+                      // Ignore React-specific errors
+                    }
+
+                    // Use the native setter to trigger React's internal handling
+                    try {
+                      var nativeInputCheckedSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+                      nativeInputCheckedSetter.call(checkbox, true);
                     } catch (e) {
                       // Fallback to direct assignment
                       checkbox.checked = true;
@@ -2783,37 +4869,26 @@ class RegistrationManager {
                     // Also set the attribute for compatibility
                     checkbox.setAttribute('checked', 'checked');
 
-                    // Dispatch all relevant events
-                    var events = ['change', 'input', 'click'];
-                    for (var e = 0; e < events.length; e++) {
-                      try {
-                        var evt = new Event(events[e], { bubbles: true, cancelable: true });
-                        checkbox.dispatchEvent(evt);
-                      } catch (err) {
-                        // Ignore errors
+                    // CRITICAL: Dispatch change event with all React-required properties
+                    try {
+                      var changeEvent = new Event('change', { bubbles: true, cancelable: false });
+                      // React also listens for 'input' events on checkboxes
+                      var inputEvent = new Event('input', { bubbles: true, cancelable: false });
+                      checkbox.dispatchEvent(inputEvent);
+                      checkbox.dispatchEvent(changeEvent);
+                    } catch (err) {
+                      // Fallback for older browsers
+                      var events = ['change', 'input', 'click'];
+                      for (var e = 0; e < events.length; e++) {
+                        try {
+                          var evt = new Event(events[e], { bubbles: true, cancelable: true });
+                          checkbox.dispatchEvent(evt);
+                        } catch (evtErr) {
+                          // Ignore errors
+                        }
                       }
                     }
 
-                    // Also try React's onChange if it exists
-                    try {
-                      if (checkbox._valueTracker) {
-                        checkbox._valueTracker.setValue('');
-                      }
-                      var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-                      if (descriptor && descriptor.set) {
-                        descriptor.set.call(checkbox, checkbox.value || '');
-                      }
-                    } catch (err) {
-                      // Ignore React-specific errors
-                    }
-
-                    // Force React to recognize the change
-                    try {
-                      var reactEvent = new Event('input', { bubbles: true });
-                      checkbox.dispatchEvent(reactEvent);
-                    } catch (err) {
-                      // Ignore errors
-                    }
                   }
 
                   // Verify it's checked with a small delay to allow React to process
@@ -2821,7 +4896,7 @@ class RegistrationManager {
                     var finalChecked = checkbox.checked || checkbox.hasAttribute('checked');
                     if (!finalChecked) {
                       // Retry once more if still not checked
-                      console.log('[Luma Auto Register] ⚠️ Checkbox still not checked, retrying...');
+                      console.log('[Event Auto Register] ⚠️ Checkbox still not checked, retrying...');
                       try {
                         // Try clicking the label or parent one more time
                         var retryTarget = labelEl || parent || checkbox;
@@ -2833,14 +4908,14 @@ class RegistrationManager {
                           checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                         }
                       } catch (e) {
-                        console.log('[Luma Auto Register] Retry failed: ' + e.message);
+                        console.log('[Event Auto Register] Retry failed: ' + e.message);
                       }
                     }
                   }, 100);
 
                   // Verify it's checked
                   var finalChecked = checkbox.checked || checkbox.hasAttribute('checked');
-                  console.log('[Luma Auto Register] ✓ ' + desc + ' checked via helper (final state: ' + finalChecked + ')');
+                  console.log('[Event Auto Register] ✓ ' + desc + ' checked via helper (final state: ' + finalChecked + ')');
 
                   return finalChecked;
                 };
@@ -2869,7 +4944,7 @@ class RegistrationManager {
                       var inputsInModal = modal.querySelectorAll('input, textarea, select');
                       if (inputsInModal.length > 0) {
                         formContainer = modal;
-                        console.log('[Luma Auto Register] Found form in visible modal: ' + modalSelectors[ms] + ' with ' + inputsInModal.length + ' inputs');
+                        console.log('[Event Auto Register] Found form in visible modal: ' + modalSelectors[ms] + ' with ' + inputsInModal.length + ' inputs');
                         break;
                       }
                     }
@@ -2899,18 +4974,18 @@ class RegistrationManager {
                   }
                 }
 
-                console.log('[Luma Auto Register] Found ' + visibleInputs.length + ' visible form fields (out of ' + allInputs.length + ' total), ' + customDropdowns.length + ' custom dropdowns');
+                console.log('[Event Auto Register] Found ' + visibleInputs.length + ' visible form fields (out of ' + allInputs.length + ' total), ' + customDropdowns.length + ' custom dropdowns');
 
                 // CRITICAL CHECK: If we found absolutely NO inputs and NO dropdowns, the form detection likely failed
                 // BUT: Some events have NO custom questions - just need to click submit directly
                 var formDetectionFailed = (visibleInputs.length === 0 && allInputs.length === 0 && customDropdowns.length === 0);
                 if (formDetectionFailed) {
-                  console.log('[Luma Auto Register] No form fields found - checking if this is a direct-submit event...');
+                  console.log('[Event Auto Register] No form fields found - checking if this is a direct-submit event...');
                   
                   // Look for submit button to click directly (events with no custom questions)
                   var directSubmitBtn = null;
                   var allBtns = document.querySelectorAll('button[type="submit"], button');
-                  console.log('[Luma Auto Register] Searching ' + allBtns.length + ' buttons for direct submit...');
+                  console.log('[Event Auto Register] Searching ' + allBtns.length + ' buttons for direct submit...');
                   
                   for (var dsb = 0; dsb < allBtns.length; dsb++) {
                     var dsbText = (allBtns[dsb].textContent || '').toLowerCase().trim();
@@ -2918,14 +4993,14 @@ class RegistrationManager {
                     var dsbVisible = allBtns[dsb].offsetParent !== null;
                     var dsbDisabled = allBtns[dsb].disabled;
                     
-                    console.log('[Luma Auto Register]   Button ' + dsb + ': "' + dsbText.substring(0, 30) + '" type=' + dsbType + ' visible=' + dsbVisible);
+                    console.log('[Event Auto Register]   Button ' + dsb + ': "' + dsbText.substring(0, 30) + '" type=' + dsbType + ' visible=' + dsbVisible);
                     
                     if (dsbVisible && !dsbDisabled) {
                       // Look for submit-type buttons, prioritize type=submit
                       if (dsbText.indexOf('request to join') > -1 || dsbText.indexOf('register') > -1 || dsbText.indexOf('join waitlist') > -1 || dsbText.indexOf('submit') > -1) {
                         if (dsbType === 'submit' || !directSubmitBtn) {
                           directSubmitBtn = allBtns[dsb];
-                          console.log('[Luma Auto Register] ✓ Found potential submit button: "' + dsbText + '"');
+                          console.log('[Event Auto Register] ✓ Found potential submit button: "' + dsbText + '"');
                           if (dsbType === 'submit') break; // Best match found
                         }
                       }
@@ -2933,8 +5008,8 @@ class RegistrationManager {
                   }
                   
                   if (directSubmitBtn) {
-                    console.log('[Luma Auto Register] Found direct submit button: "' + directSubmitBtn.textContent.trim() + '"');
-                    console.log('[Luma Auto Register] This event has no custom form fields - clicking submit directly...');
+                    console.log('[Event Auto Register] Found direct submit button: "' + directSubmitBtn.textContent.trim() + '"');
+                    console.log('[Event Auto Register] This event has no custom form fields - clicking submit directly...');
                     
                     // Click the submit button
                     directSubmitBtn.focus();
@@ -2945,7 +5020,7 @@ class RegistrationManager {
                       directSubmitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
                     } catch(e) {}
                     
-                    console.log('[Luma Auto Register] ✓ Direct submit clicked!');
+                    console.log('[Event Auto Register] ✓ Direct submit clicked!');
                     
                     // Poll for success (network flag or page indicators)
                     var directPollAttempts = 0;
@@ -2955,8 +5030,8 @@ class RegistrationManager {
                       directPollAttempts++;
                       
                       // Check network flag
-                      if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                        console.log('[Luma Auto Register] ✓ Direct registration confirmed via network (poll ' + directPollAttempts + ')');
+                      if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                        console.log('[Event Auto Register] ✓ Direct registration confirmed via network (poll ' + directPollAttempts + ')');
                         resolve({ success: true, message: 'Registered successfully (no form fields required)' });
                         return;
                       }
@@ -2973,7 +5048,7 @@ class RegistrationManager {
                                       pageText.indexOf("you're in") > -1;
                       
                       if (hasSuccess) {
-                        console.log('[Luma Auto Register] ✓ Direct registration appears successful (poll ' + directPollAttempts + ')!');
+                        console.log('[Event Auto Register] ✓ Direct registration appears successful (poll ' + directPollAttempts + ')!');
                         resolve({ success: true, message: 'Registration submitted (no form fields required)' });
                         return;
                       }
@@ -2983,9 +5058,9 @@ class RegistrationManager {
                         return;
                       }
                       
-                      // Polling exhausted - assume success since we clicked
-                      console.log('[Luma Auto Register] Direct submit polling exhausted - assuming success');
-                      resolve({ success: true, message: 'Registration attempted (no form fields detected)' });
+                      // Polling exhausted - could not confirm success, mark as failed
+                      console.log('[Event Auto Register] Direct submit polling exhausted - could not confirm success');
+                      resolve({ success: false, message: 'Could not confirm registration (no form fields detected) - please verify manually' });
                     };
                     
                     // Start polling after short delay
@@ -2994,12 +5069,12 @@ class RegistrationManager {
                   }
                   
                   // No direct submit button found either
-                  console.log('[Luma Auto Register] ⚠️⚠️⚠️ FORM DETECTION FAILED - No inputs, dropdowns, or submit button found!');
-                  console.log('[Luma Auto Register] This likely means:');
-                  console.log('[Luma Auto Register]   1. The form is in a cross-origin iframe');
-                  console.log('[Luma Auto Register]   2. The form uses non-standard input elements');
-                  console.log('[Luma Auto Register]   3. The form has not loaded yet');
-                  console.log('[Luma Auto Register] Marking as FAILED to avoid false positives');
+                  console.log('[Event Auto Register] ⚠️⚠️⚠️ FORM DETECTION FAILED - No inputs, dropdowns, or submit button found!');
+                  console.log('[Event Auto Register] This likely means:');
+                  console.log('[Event Auto Register]   1. The form is in a cross-origin iframe');
+                  console.log('[Event Auto Register]   2. The form uses non-standard input elements');
+                  console.log('[Event Auto Register]   3. The form has not loaded yet');
+                  console.log('[Event Auto Register] Marking as FAILED to avoid false positives');
                   
                   resolve({
                     success: false,
@@ -3039,6 +5114,31 @@ class RegistrationManager {
                   if (parentLabel && !label) {
                     labelElement = parentLabel;
                     label = parentLabel.textContent.toLowerCase();
+                  }
+                  
+                  // Also look for labels near the input (previous sibling, wrapper div with label-like class)
+                  if (!label || label.trim().length === 0) {
+                    // Try previous sibling
+                    var prevSib = input.previousElementSibling;
+                    while (prevSib && !label) {
+                      if (prevSib.tagName === 'LABEL' || prevSib.classList.contains('label') || 
+                          prevSib.classList.contains('field-label') || prevSib.classList.contains('form-label')) {
+                        label = (prevSib.textContent || '').toLowerCase();
+                        break;
+                      }
+                      prevSib = prevSib.previousElementSibling;
+                    }
+                    // Try parent's label-like children
+                    if (!label && input.parentElement) {
+                      var parentLabels = input.parentElement.querySelectorAll('label, .label, .field-label, span');
+                      for (var pl = 0; pl < parentLabels.length; pl++) {
+                        var plText = (parentLabels[pl].textContent || '').trim().toLowerCase();
+                        if (plText.length > 0 && plText.length < 200 && parentLabels[pl] !== input) {
+                          label = plText;
+                          break;
+                        }
+                      }
+                    }
                   }
 
                   // Check if field is REQUIRED - ONLY fields with asterisk (*)
@@ -3112,7 +5212,7 @@ class RegistrationManager {
                       input.getAttribute('aria-required') === 'true' ||
                       input.closest('[required]')) {
                       hasAsterisk = true;
-                      console.log('[Luma Auto Register] Field marked as required via attribute (no visible asterisk): ' + (label || name || placeholder || type));
+                      console.log('[Event Auto Register] Field marked as required via attribute (no visible asterisk): ' + (label || name || placeholder || type));
                     }
                   }
 
@@ -3134,7 +5234,7 @@ class RegistrationManager {
                     for (var rtp = 0; rtp < requiredTextPatterns.length; rtp++) {
                       if (requiredTextPatterns[rtp].test(textToCheck)) {
                         hasAsterisk = true;
-                        console.log('[Luma Auto Register] Field marked as required via text pattern: ' + (label || name || placeholder || type));
+                        console.log('[Event Auto Register] Field marked as required via text pattern: ' + (label || name || placeholder || type));
                         break;
                       }
                     }
@@ -3151,7 +5251,7 @@ class RegistrationManager {
                       for (var rc2 = 0; rc2 < requiredClasses.length; rc2++) {
                         if (classList.indexOf(requiredClasses[rc2]) > -1) {
                           hasAsterisk = true;
-                          console.log('[Luma Auto Register] Field marked as required via CSS class: ' + (label || name || placeholder || type));
+                          console.log('[Event Auto Register] Field marked as required via CSS class: ' + (label || name || placeholder || type));
                           break;
                         }
                       }
@@ -3160,7 +5260,7 @@ class RegistrationManager {
                         for (var rc3 = 0; rc3 < requiredClasses.length; rc3++) {
                           if (labelClassList.indexOf(requiredClasses[rc3]) > -1) {
                             hasAsterisk = true;
-                            console.log('[Luma Auto Register] Field marked as required via label CSS class: ' + (label || name || placeholder || type));
+                            console.log('[Event Auto Register] Field marked as required via label CSS class: ' + (label || name || placeholder || type));
                             break;
                           }
                         }
@@ -3172,11 +5272,11 @@ class RegistrationManager {
 
                   // ONLY fill fields with asterisks
                   if (!hasAsterisk) {
-                    console.log('[Luma Auto Register] Skipping optional field (no asterisk): ' + (label || name || placeholder));
+                    console.log('[Event Auto Register] Skipping optional field (no asterisk): ' + (label || name || placeholder));
                     continue;
                   }
 
-                  console.log('[Luma Auto Register] Required field detected (has asterisk): ' + (label || name || placeholder));
+                  console.log('[Event Auto Register] Required field detected (has asterisk): ' + (label || name || placeholder));
 
                   // SPECIAL: Detect ALL required checkboxes (check this BEFORE other logic)
                   if (type === 'checkbox') {
@@ -3250,7 +5350,7 @@ class RegistrationManager {
                       if (isTermsCheckbox) {
                         if (!termsCheckbox) {
                           termsCheckbox = input;
-                          console.log('[Luma Auto Register] Found terms checkbox: ' + (label || name || id));
+                          console.log('[Event Auto Register] Found terms checkbox: ' + (label || name || id));
                         }
                       } else {
                         // Check if this is a sponsorship/donation checkbox - DO NOT auto-check these
@@ -3269,16 +5369,16 @@ class RegistrationManager {
                           checkboxLabelLower.indexOf('interested in sponsor') > -1;
                         
                         if (isDonationOrSponsorCheckbox) {
-                          console.log('[Luma Auto Register] ⚠️ Skipping donation/sponsorship checkbox (will NOT auto-check): ' + (label || name || id));
+                          console.log('[Event Auto Register] ⚠️ Skipping donation/sponsorship checkbox (will NOT auto-check): ' + (label || name || id));
                           // Don't add to requiredCheckboxes - we don't want to auto-check these
                         } else {
                           // It's a required checkbox but not terms or sponsorship - add to list (always check these)
-                          requiredCheckboxes.push({
-                            input: input,
-                            label: label || name || id || 'checkbox',
-                            description: label || name || id || 'required checkbox'
-                          });
-                          console.log('[Luma Auto Register] Found required checkbox: ' + (label || name || id));
+                        requiredCheckboxes.push({
+                          input: input,
+                          label: label || name || id || 'checkbox',
+                          description: label || name || id || 'required checkbox'
+                        });
+                        console.log('[Event Auto Register] Found required checkbox: ' + (label || name || id));
                         }
                       }
                     }
@@ -3309,7 +5409,7 @@ class RegistrationManager {
 
                     if (!telegramValue || telegramValue.trim() === '') {
                       requiresManualCount++;
-                      console.log('[Luma Auto Register] ⚠️ Cannot auto-fill telegram field "' + (fieldDescription || 'telegram') + '" - telegram handle not provided in settings.');
+                      console.log('[Event Auto Register] ⚠️ Cannot auto-fill telegram field "' + (fieldDescription || 'telegram') + '" - telegram handle not provided in settings.');
                       continue;
                     }
 
@@ -3319,7 +5419,7 @@ class RegistrationManager {
                       description: fieldDescription || 'telegram',
                       isTelegram: true
                     });
-                    console.log('[Luma Auto Register] Will auto-fill telegram: ' + (fieldDescription || 'telegram') + ' → "' + telegramValue.trim() + '"');
+                    console.log('[Event Auto Register] Will auto-fill telegram: ' + (fieldDescription || 'telegram') + ' → "' + telegramValue.trim() + '"');
                     continue;
                   }
 
@@ -3357,11 +5457,11 @@ class RegistrationManager {
                     var currentValue = (input.value || '').trim();
 
                     // Log what we found
-                    console.log('[Luma Auto Register] Phone field detected. Current value: "' + currentValue + '", Placeholder: "' + (placeholder || 'none') + '", Settings phone: "' + (phoneValue || 'empty') + '"');
+                    console.log('[Event Auto Register] Phone field detected. Current value: "' + currentValue + '", Placeholder: "' + (placeholder || 'none') + '", Settings phone: "' + (phoneValue || 'empty') + '"');
 
                     if (!phoneValue || phoneValue.trim() === '') {
                       requiresManualCount++;
-                      console.log('[Luma Auto Register] ⚠️ Cannot auto-fill phone field "' + (label || name || placeholder || 'phone') + '" - phone number not provided in settings. Please add your phone number in the extension settings.');
+                      console.log('[Event Auto Register] ⚠️ Cannot auto-fill phone field "' + (label || name || placeholder || 'phone') + '" - phone number not provided in settings. Please add your phone number in the extension settings.');
                       continue;
                     }
 
@@ -3400,21 +5500,21 @@ class RegistrationManager {
                         description: fieldDescription,
                         isPhone: true
                       });
-                      console.log('[Luma Auto Register] Will auto-fill phone: ' + fieldDescription + ' → "' + phoneValue + '"');
+                      console.log('[Event Auto Register] Will auto-fill phone: ' + fieldDescription + ' → "' + phoneValue + '"');
                       continue;
                     } else {
                       // Field has a real value - check if it matches the user's phone
                       // If it doesn't match, we still overwrite to keep things consistent
-                      console.log('[Luma Auto Register] Phone field already has value (not a placeholder): ' + currentValue);
+                      console.log('[Event Auto Register] Phone field already has value (not a placeholder): ' + currentValue);
                       if (currentValue !== phoneValue) {
-                        console.log('[Luma Auto Register] Phone value differs from settings, will overwrite...');
+                        console.log('[Event Auto Register] Phone value differs from settings, will overwrite...');
                         fieldsToFill.push({
                           input: input,
                           value: phoneValue,
                           description: fieldDescription,
                           isPhone: true
                         });
-                        console.log('[Luma Auto Register] Will auto-fill phone: ' + fieldDescription + ' → "' + phoneValue + '"');
+                        console.log('[Event Auto Register] Will auto-fill phone: ' + fieldDescription + ' → "' + phoneValue + '"');
                       }
                       continue;
                     }
@@ -3439,7 +5539,7 @@ class RegistrationManager {
                   if (isEmailField) {
                     // Check if email is already filled
                     if (existingValue.length > 0) {
-                      console.log('[Luma Auto Register] Email field already filled, skipping');
+                      console.log('[Event Auto Register] Email field already filled, skipping');
                       continue;
                     }
                     // Fill email from settings if available
@@ -3449,9 +5549,9 @@ class RegistrationManager {
                         value: settings.email.trim(),
                         description: fieldDescription || 'email'
                       });
-                      console.log('[Luma Auto Register] Will auto-fill email: ' + (fieldDescription || 'email') + ' → "' + settings.email.trim() + '"');
+                      console.log('[Event Auto Register] Will auto-fill email: ' + (fieldDescription || 'email') + ' → "' + settings.email.trim() + '"');
                     } else {
-                      console.log('[Luma Auto Register] ⚠️ Cannot auto-fill email field - email not provided in settings');
+                      console.log('[Event Auto Register] ⚠️ Cannot auto-fill email field - email not provided in settings');
                       requiresManualCount++;
                     }
                     continue; // Skip to next field after handling email
@@ -3466,12 +5566,11 @@ class RegistrationManager {
                   var placeholderLower = placeholder.toLowerCase();
                   var labelLower = label.toLowerCase();
 
-                  // Check if it looks like a dropdown (has "Select" or "Choose" in placeholder/label)
-                  if (placeholderLower.indexOf('select') > -1 || placeholderLower.indexOf('choose') > -1 ||
-                    labelLower.indexOf('select') > -1 || labelLower.indexOf('choose') > -1 ||
-                    labelLower.indexOf('involvement') > -1 || labelLower.indexOf('interested') > -1) {
+                  // Check if it looks like a dropdown - ONLY based on placeholder having "Select" or "Choose"
+                  // Do NOT use label keywords like "interested" - that causes text inputs to be skipped
+                  if (placeholderLower.indexOf('select') > -1 || placeholderLower.indexOf('choose') > -1) {
                     isCustomDropdown = true;
-                    console.log('[Luma Auto Register] Detected custom dropdown (skipping text fill): ' + (label || placeholder || name));
+                    console.log('[Event Auto Register] Detected custom dropdown (skipping text fill): ' + (label || placeholder || name));
                     // Skip this from regular text field processing - it will be handled as a custom dropdown later
                     continue;
                   }
@@ -3481,8 +5580,28 @@ class RegistrationManager {
 
                   // Note: containsAny function is already defined earlier in the code
 
+                  // PRIORITY 1: Social media fields - check FIRST to avoid "name" substring matching
+                  // These should match before generic "name" fields since "Twitter username" contains "name"
+                  if (name.indexOf('twitter') > -1 || label.indexOf('twitter') > -1 ||
+                    label.indexOf('x.com') > -1 || label.indexOf('x (twitter)') > -1 ||
+                    label.indexOf('x handle') > -1 || label.indexOf('x profile') > -1 ||
+                    placeholder.indexOf('twitter') > -1 || placeholder.indexOf('@') > -1) {
+                    valueToFill = settings.twitter;
+                  } else if (name.indexOf('telegram') > -1 || label.indexOf('telegram') > -1 ||
+                    placeholder.indexOf('telegram') > -1) {
+                    valueToFill = settings.telegram;
+                  } else if (name.indexOf('instagram') > -1 || label.indexOf('instagram') > -1 ||
+                    placeholder.indexOf('instagram') > -1) {
+                    valueToFill = settings.instagram;
+                  } else if (name.indexOf('linkedin') > -1 || label.indexOf('linkedin') > -1 ||
+                    placeholder.indexOf('linkedin') > -1) {
+                    valueToFill = settings.linkedin;
+                  } else if (name.indexOf('youtube') > -1 || label.indexOf('youtube') > -1 ||
+                    placeholder.indexOf('youtube') > -1) {
+                    valueToFill = settings.youtube;
+                  }
                   // Full Name field
-                  if ((label.indexOf('full name') > -1 || placeholder.indexOf('full name') > -1 ||
+                  else if ((label.indexOf('full name') > -1 || placeholder.indexOf('full name') > -1 ||
                     name.indexOf('fullname') > -1) &&
                     (label.indexOf('first') === -1 && label.indexOf('last') === -1)) {
                     if (settings.firstName && settings.lastName) {
@@ -3507,14 +5626,19 @@ class RegistrationManager {
                       valueToFill = settings.lastName;
                     }
                   }
-                  // Generic Name field (just "name" without "first" or "last" or "company" or "fund")
+                  // Generic Name field - ONLY match if label is specifically "name" or "your name"
+                  // Exclude social media fields that contain "name" like "Twitter username"
                   else if ((label.indexOf('name') > -1 || placeholder.indexOf('name') > -1 || name.indexOf('name') > -1) &&
                     label.indexOf('first') === -1 && label.indexOf('last') === -1 &&
                     label.indexOf('full') === -1 && placeholder.indexOf('full') === -1 &&
                     name.indexOf('first') === -1 && name.indexOf('last') === -1 &&
                     label.indexOf('company') === -1 && label.indexOf('fund') === -1 &&
                     label.indexOf('organization') === -1 && label.indexOf('organisation') === -1 &&
-                    label.indexOf('business') === -1 && label.indexOf('employer') === -1) {
+                    label.indexOf('business') === -1 && label.indexOf('employer') === -1 &&
+                    label.indexOf('user') === -1 && label.indexOf('handle') === -1 &&
+                    label.indexOf('twitter') === -1 && label.indexOf('instagram') === -1 &&
+                    label.indexOf('telegram') === -1 && label.indexOf('linkedin') === -1 &&
+                    label.indexOf('youtube') === -1 && label.indexOf('x ') === -1) {
                     // Use full name if both first and last are available, otherwise use what's available
                     if (settings.firstName && settings.lastName) {
                       valueToFill = settings.firstName + ' ' + settings.lastName;
@@ -3524,33 +5648,17 @@ class RegistrationManager {
                       valueToFill = settings.lastName;
                     }
                   }
-                  // Social media fields
-                  else if (name.indexOf('twitter') > -1 || label.indexOf('twitter') > -1 ||
-                    label.indexOf('x.com') > -1 || label.indexOf('x (twitter)') > -1 ||
-                    placeholder.indexOf('twitter') > -1) {
-                    valueToFill = settings.twitter;
-                  } else if (name.indexOf('telegram') > -1 || label.indexOf('telegram') > -1 ||
-                    placeholder.indexOf('telegram') > -1) {
-                    valueToFill = settings.telegram;
-                  } else if (name.indexOf('instagram') > -1 || label.indexOf('instagram') > -1 ||
-                    placeholder.indexOf('instagram') > -1) {
-                    valueToFill = settings.instagram;
-                  } else if (name.indexOf('linkedin') > -1 || label.indexOf('linkedin') > -1 ||
-                    placeholder.indexOf('linkedin') > -1) {
-                    valueToFill = settings.linkedin;
-                  } else if (name.indexOf('youtube') > -1 || label.indexOf('youtube') > -1 ||
-                    placeholder.indexOf('youtube') > -1) {
-                    valueToFill = settings.youtube;
-                  }
                   // Professional fields
-                  // Check for "company website" FIRST (before generic "company" check)
+                  // Check for "company website" or "project link" FIRST (before generic "company" check)
                   else if ((name.indexOf('company') > -1 && (name.indexOf('website') > -1 || name.indexOf('url') > -1)) ||
                     (label.indexOf('company') > -1 && (label.indexOf('website') > -1 || label.indexOf('url') > -1)) ||
-                    (placeholder.indexOf('company') > -1 && (placeholder.indexOf('website') > -1 || placeholder.indexOf('url') > -1))) {
-                    // Company website field - use companyWebsite setting, fallback to website
+                    (placeholder.indexOf('company') > -1 && (placeholder.indexOf('website') > -1 || placeholder.indexOf('url') > -1)) ||
+                    label.indexOf('share a link') > -1 || label.indexOf('project link') > -1 ||
+                    label.indexOf('company link') > -1 || label.indexOf('fund link') > -1) {
+                    // Company/project website field - use companyWebsite setting, fallback to website
                     valueToFill = settings.companyWebsite || settings.website || '';
                   } else if (containsAny(name, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund']) ||
-                    containsAny(label, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund']) ||
+                    containsAny(label, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund', 'project name']) ||
                     containsAny(placeholder, ['company', 'employer', 'organization', 'organisation', 'employer name', 'workplace', 'business', 'firm', 'fund name', 'fund'])) {
                     valueToFill = settings.company || 'Independent';
                   } else if ((name.indexOf('title') > -1 || label.indexOf('job title') > -1 ||
@@ -3650,10 +5758,12 @@ class RegistrationManager {
                     valueToFill = settings.bio || 'Professional interested in blockchain and technology';
                   }
                   // Why attending / Interests / Purpose
-                  else if (label.indexOf('why') > -1 || label.indexOf('interest') > -1 ||
-                    label.indexOf('reason') > -1 || placeholder.indexOf('why') > -1 ||
-                    label.indexOf('attending') > -1 || label.indexOf('purpose') > -1 ||
-                    label.indexOf('goal') > -1) {
+                  // EXCLUDE yes/no questions like "are you interested in X" - those should use fallback
+                  else if ((label.indexOf('why') > -1 || label.indexOf('reason') > -1 || 
+                    placeholder.indexOf('why') > -1 || label.indexOf('attending') > -1 || 
+                    label.indexOf('purpose') > -1 || label.indexOf('goal') > -1 ||
+                    // Only match "interest" if NOT a yes/no question format
+                    (label.indexOf('interest') > -1 && label.indexOf('are you interested') === -1 && label.indexOf('interested in') === -1 && label.indexOf('interested to') === -1))) {
                     valueToFill = settings.interests || 'Networking and professional development';
                   }
                   // Generic text fields with no specific match - use generic answers
@@ -3673,11 +5783,11 @@ class RegistrationManager {
 
                   // Handle dropdown/select elements - just pick first valid option
                   if ((type === 'select-one' || input.tagName === 'SELECT') && isRequired) {
-                    console.log('[Luma Auto Register] Detected dropdown field: ' + fieldDescription);
+                    console.log('[Event Auto Register] Detected dropdown field: ' + fieldDescription);
 
                     var options = Array.from(input.options || []);
                     if (options.length === 0) {
-                      console.log('[Luma Auto Register] No options found in dropdown');
+                      console.log('[Event Auto Register] No options found in dropdown');
                       requiresManualCount++;
                       continue;
                     }
@@ -3694,7 +5804,7 @@ class RegistrationManager {
                     });
 
                     if (realOptions.length === 0) {
-                      console.log('[Luma Auto Register] No valid options found in dropdown');
+                      console.log('[Event Auto Register] No valid options found in dropdown');
                       requiresManualCount++;
                       continue;
                     }
@@ -3703,7 +5813,7 @@ class RegistrationManager {
                     var selectedOption = realOptions[0];
                     var selectedValue = realOptions[0].value;
 
-                    console.log('[Luma Auto Register] Found ' + realOptions.length + ' valid options, selecting first: "' + selectedOption.text + '"');
+                    console.log('[Event Auto Register] Found ' + realOptions.length + ' valid options, selecting first: "' + selectedOption.text + '"');
 
                     fieldsToFill.push({
                       input: input,
@@ -3711,7 +5821,7 @@ class RegistrationManager {
                       description: fieldDescription,
                       isSelect: true
                     });
-                    console.log('[Luma Auto Register] Will auto-fill dropdown: ' + fieldDescription + ' → "' + selectedOption.text + '"');
+                    console.log('[Event Auto Register] Will auto-fill dropdown: ' + fieldDescription + ' → "' + selectedOption.text + '"');
 
                     // Skip to next field (we've handled this dropdown)
                     continue;
@@ -3723,13 +5833,13 @@ class RegistrationManager {
                       value: valueToFill,
                       description: fieldDescription
                     });
-                    console.log('[Luma Auto Register] Will auto-fill: ' + fieldDescription);
+                    console.log('[Event Auto Register] Will auto-fill: ' + fieldDescription);
                   } else if (type !== 'hidden' && type !== 'submit' && type !== 'button') {
                     // Only count truly unfillable fields (phone, referral codes, etc)
                     if (label.indexOf('phone') > -1 || label.indexOf('referral') > -1 ||
                       label.indexOf('code') > -1 || name.indexOf('code') > -1) {
                       requiresManualCount++;
-                      console.log('[Luma Auto Register] Cannot auto-fill (sensitive): ' + fieldDescription);
+                      console.log('[Event Auto Register] Cannot auto-fill (sensitive): ' + fieldDescription);
                     } else {
                       // Unknown field type - use single generic answer for required fields
                       var genericValue = settings.genericAnswer1 || 'To be provided';
@@ -3740,7 +5850,7 @@ class RegistrationManager {
                         value: genericValue,
                         description: fieldDescription
                       });
-                      console.log('[Luma Auto Register] Will auto-fill with generic answer: ' + fieldDescription + ' → "' + genericValue + '"');
+                      console.log('[Event Auto Register] Will auto-fill with generic answer: ' + fieldDescription + ' → "' + genericValue + '"');
                     }
                   }
                 }
@@ -3773,7 +5883,7 @@ class RegistrationManager {
                 ).singleNodeValue;
 
                 if (multiSelectLabel) {
-                  console.log('[Luma Auto Register] Found multi-select label text: "' + (multiSelectLabel.textContent || '').trim() + '"');
+                  console.log('[Event Auto Register] Found multi-select label text: "' + (multiSelectLabel.textContent || '').trim() + '"');
                   // Find the input associated with this label
                   var labelElement = multiSelectLabel.parentElement;
                   while (labelElement && labelElement.tagName !== 'LABEL' && labelElement.tagName !== 'DIV' && labelElement.tagName !== 'FORM') {
@@ -3786,7 +5896,7 @@ class RegistrationManager {
                     if (container) {
                       var nearbyInput = container.querySelector('input[type="text"], input:not([type]), input[placeholder*="select"], input[placeholder*="Select"]');
                       if (nearbyInput && !Array.from(allFormInputs).includes(nearbyInput)) {
-                        console.log('[Luma Auto Register] Found multi-select input via label search: placeholder="' + (nearbyInput.placeholder || '') + '"');
+                        console.log('[Event Auto Register] Found multi-select input via label search: placeholder="' + (nearbyInput.placeholder || '') + '"');
                         allFormInputs = Array.from(allFormInputs);
                         allFormInputs.push(nearbyInput);
                         allFormInputs = Array.from(new Set(allFormInputs)); // Remove duplicates
@@ -3795,14 +5905,14 @@ class RegistrationManager {
                   }
                 }
 
-                console.log('[Luma Auto Register] Checking ' + allFormInputs.length + ' text inputs for potential dropdowns');
+                console.log('[Event Auto Register] Checking ' + allFormInputs.length + ' text inputs for potential dropdowns');
 
                 for (var d = 0; d < allFormInputs.length; d++) {
                   var input = allFormInputs[d];
 
                   // Skip if not visible or disabled
                   if (!input.offsetParent || input.disabled) {
-                    console.log('[Luma Auto Register]   Input ' + d + ': Skipped (not visible or disabled)');
+                    console.log('[Event Auto Register]   Input ' + d + ': Skipped (not visible or disabled)');
                     continue;
                   }
 
@@ -3810,7 +5920,7 @@ class RegistrationManager {
                   var inputPlaceholderDebug = (input.placeholder || '').trim();
                   var inputNameDebug = (input.name || '').trim();
                   var inputIdDebug = (input.id || '').trim();
-                  console.log('[Luma Auto Register]   Input ' + d + ': placeholder="' + inputPlaceholderDebug + '", name="' + inputNameDebug + '", id="' + inputIdDebug + '"');
+                  console.log('[Event Auto Register]   Input ' + d + ': placeholder="' + inputPlaceholderDebug + '", name="' + inputNameDebug + '", id="' + inputIdDebug + '"');
 
                   // IMPORTANT: Skip checkboxes - they are handled separately, not as dropdowns
                   var inputType = (input.type || '').toLowerCase();
@@ -3829,7 +5939,7 @@ class RegistrationManager {
                     currentValue !== inputPlaceholder &&
                     !inputPlaceholder.toLowerCase().includes(currentValue.toLowerCase()) &&
                     !isMultiSelectPlaceholder) {
-                    console.log('[Luma Auto Register]   Input ' + d + ': Skipped (already has value: "' + currentValue + '")');
+                    console.log('[Event Auto Register]   Input ' + d + ': Skipped (already has value: "' + currentValue + '")');
                     continue; // Has a real value, skip it
                   }
 
@@ -3896,7 +6006,7 @@ class RegistrationManager {
                           var candidateText = (candidate.textContent || '').trim();
                           if (candidateText.length > 5 && candidateText.length < 300) {
                             inputLabel = candidateText.toLowerCase();
-                            console.log('[Luma Auto Register]   Input ' + d + ': Found label from parent container: "' + inputLabel.substring(0, 100) + '"');
+                            console.log('[Event Auto Register]   Input ' + d + ': Found label from parent container: "' + inputLabel.substring(0, 100) + '"');
                             labelEl = candidate;
                             break;
                           }
@@ -3907,7 +6017,7 @@ class RegistrationManager {
 
                   // Log the final label found
                   if (inputLabel && inputLabel.length > 5) {
-                    console.log('[Luma Auto Register]   Input ' + d + ': Final label="' + inputLabel + '"');
+                    console.log('[Event Auto Register]   Input ' + d + ': Final label="' + inputLabel + '"');
                   }
 
                   if (inputName.indexOf('phone') > -1 || inputName.indexOf('email') > -1 ||
@@ -3959,9 +6069,9 @@ class RegistrationManager {
                     parentText.indexOf('select one or more') > -1;
 
                   if (isMultiSelectByText) {
-                    console.log('[Luma Auto Register]   Input ' + d + ': Detected multi-select dropdown by "Select one or more" text');
-                    console.log('[Luma Auto Register]     Placeholder: "' + inputPlaceholder + '"');
-                    console.log('[Luma Auto Register]     Value: "' + (input.value || '') + '"');
+                    console.log('[Event Auto Register]   Input ' + d + ': Detected multi-select dropdown by "Select one or more" text');
+                    console.log('[Event Auto Register]     Placeholder: "' + inputPlaceholder + '"');
+                    console.log('[Event Auto Register]     Value: "' + (input.value || '') + '"');
                     // This is definitely a multi-select dropdown, mark it as such
                     var isRequired = false;
 
@@ -3971,7 +6081,7 @@ class RegistrationManager {
                       var labelHTML = (labelEl.innerHTML || '');
                       if (labelText.indexOf('*') > -1 || labelHTML.indexOf('*') > -1 || labelHTML.indexOf('&#42;') > -1) {
                         isRequired = true;
-                        console.log('[Luma Auto Register]     Required: Yes (asterisk in label)');
+                        console.log('[Event Auto Register]     Required: Yes (asterisk in label)');
                       }
                     }
 
@@ -3982,7 +6092,7 @@ class RegistrationManager {
                       borderColor.indexOf('rgb(220, 38, 38)') > -1 ||
                       borderColor.indexOf('#ef4444') > -1) {
                       isRequired = true;
-                      console.log('[Luma Auto Register]     Required: Yes (red border detected)');
+                      console.log('[Event Auto Register]     Required: Yes (red border detected)');
                     }
 
                     // Check parent container for labels with asterisks (for conditional dropdowns)
@@ -3999,7 +6109,7 @@ class RegistrationManager {
                               labelTextCheck.indexOf('categories') > -1 || labelTextCheck.indexOf('apply to') > -1) &&
                             (labelTextCheck.indexOf('*') > -1 || labelHTMLCheck.indexOf('*') > -1 || labelHTMLCheck.indexOf('&#42;') > -1)) {
                             isRequired = true;
-                            console.log('[Luma Auto Register]     Required: Yes (asterisk in conditional label: "' + labelTextCheck.substring(0, 80) + '")');
+                            console.log('[Event Auto Register]     Required: Yes (asterisk in conditional label: "' + labelTextCheck.substring(0, 80) + '")');
                             // Update inputLabel with the found label
                             if (!inputLabel || inputLabel.length < 5) {
                               inputLabel = labelTextCheck;
@@ -4015,7 +6125,7 @@ class RegistrationManager {
                     // OR if they have a red border (validation error)
                     if (isRequired) {
                       var finalLabel = inputLabel || 'multi-select dropdown';
-                      console.log('[Luma Auto Register] ✓ Adding multi-select dropdown to process: "' + finalLabel + '"');
+                      console.log('[Event Auto Register] ✓ Adding multi-select dropdown to process: "' + finalLabel + '"');
                       customDropdownsToProcess.push({
                         element: input,
                         label: finalLabel,
@@ -4023,35 +6133,37 @@ class RegistrationManager {
                       });
                       continue; // Skip to next input, this one is handled
                     } else {
-                      console.log('[Luma Auto Register]     Required: No (skipping optional multi-select)');
+                      console.log('[Event Auto Register]     Required: No (skipping optional multi-select)');
                     }
                   }
 
                   // Check for other dropdown indicators (skip if already handled as multi-select above)
                   // Also check for "Select an option" which is a common single-select dropdown placeholder
-                  var looksLikeDropdown =
-                    inputPlaceholder.indexOf('select') > -1 ||
-                    inputPlaceholder.indexOf('choose') > -1 ||
-                    inputPlaceholder.toLowerCase().indexOf('select an option') > -1 ||
-                    labelLower.indexOf('select') > -1 ||
-                    labelLower.indexOf('choose') > -1 ||
-                    labelLower.indexOf('involvement') > -1 ||
-                    labelLower.indexOf('interested') > -1 ||
-                    isMultiSelectIndicator; // Multi-select indicators count as dropdowns
+                  // IMPORTANT: Only treat as dropdown if placeholder indicates it's a dropdown
+                  // Text inputs with empty placeholders should NOT be treated as dropdowns
+                  var hasDropdownPlaceholder = 
+                    inputPlaceholder.toLowerCase().indexOf('select') > -1 ||
+                    inputPlaceholder.toLowerCase().indexOf('choose') > -1;
+                  
+                  // Only consider it a dropdown if:
+                  // 1. It has a dropdown-like placeholder (Select, Choose, etc.)
+                  // 2. OR it's a multi-select indicator
+                  // Do NOT use label keywords like "interested" to detect dropdowns - that's too broad
+                  var looksLikeDropdown = hasDropdownPlaceholder || isMultiSelectIndicator;
 
                   if (!looksLikeDropdown) {
                     // Log for debugging
                     if (inputLabel && inputLabel.length > 5) {
-                      console.log('[Luma Auto Register]   Input ' + d + ': Skipping (not a dropdown): label="' + inputLabel + '", placeholder="' + inputPlaceholder + '"');
+                      console.log('[Event Auto Register]   Input ' + d + ': Skipping (not a dropdown): label="' + inputLabel + '", placeholder="' + inputPlaceholder + '"');
                     } else {
-                      console.log('[Luma Auto Register]   Input ' + d + ': Skipping (not a dropdown, no label found): placeholder="' + inputPlaceholder + '"');
+                      console.log('[Event Auto Register]   Input ' + d + ': Skipping (not a dropdown, no label found): placeholder="' + inputPlaceholder + '"');
                     }
                     continue; // Not a dropdown, skip it
                   }
 
                   // Log detected dropdown
                   if (isMultiSelectIndicator) {
-                    console.log('[Luma Auto Register] Detected potential multi-select dropdown from label: "' + inputLabel + '"');
+                    console.log('[Event Auto Register] Detected potential multi-select dropdown from label: "' + inputLabel + '"');
                   }
 
                   // Check if required - use comprehensive asterisk detection (same as main loop)
@@ -4122,9 +6234,9 @@ class RegistrationManager {
 
                   // Log requirement status
                   if (isRequired) {
-                    console.log('[Luma Auto Register]   Input ' + d + ': REQUIRED (has asterisk or aria-required)');
+                    console.log('[Event Auto Register]   Input ' + d + ': REQUIRED (has asterisk or aria-required)');
                   } else {
-                    console.log('[Luma Auto Register]   Input ' + d + ': NOT REQUIRED (no asterisk found)');
+                    console.log('[Event Auto Register]   Input ' + d + ': NOT REQUIRED (no asterisk found)');
                   }
 
                   // Detect multi-select dropdowns - check label, placeholder, and aria attributes
@@ -4146,11 +6258,11 @@ class RegistrationManager {
                     input.getAttribute('aria-multiselectable') === 'true' ||
                     input.getAttribute('multiple') !== null) {
                     isMultiSelect = true;
-                    console.log('[Luma Auto Register] Detected multi-select dropdown: ' + inputLabel);
+                    console.log('[Event Auto Register] Detected multi-select dropdown: ' + inputLabel);
                   }
 
                   if (isRequired) {
-                    console.log('[Luma Auto Register] Found custom dropdown: ' + inputLabel + ' (placeholder: "' + inputPlaceholder + '")' + (isMultiSelect ? ' [MULTI-SELECT]' : ''));
+                    console.log('[Event Auto Register] Found custom dropdown: ' + inputLabel + ' (placeholder: "' + inputPlaceholder + '")' + (isMultiSelect ? ' [MULTI-SELECT]' : ''));
                     customDropdownsToProcess.push({
                       element: input,
                       label: inputLabel,
@@ -4161,7 +6273,7 @@ class RegistrationManager {
 
                 // Also check the original customDropdowns array for other types
                 // These might be divs/buttons that act as dropdowns, not actual input elements
-                console.log('[Luma Auto Register] Checking ' + customDropdowns.length + ' custom dropdown elements (divs/buttons)');
+                console.log('[Event Auto Register] Checking ' + customDropdowns.length + ' custom dropdown elements (divs/buttons)');
 
                 // FIRST: Search for dropdowns containing "Select one or more" text (even if not in an input)
                 var allElementsForDropdown = document.querySelectorAll('*');
@@ -4273,7 +6385,7 @@ class RegistrationManager {
                             var dropdownIndex = Array.from(container.children).indexOf(elem);
                             if (labelIndex >= 0 && dropdownIndex >= 0 && labelIndex < dropdownIndex && (dropdownIndex - labelIndex) < 10) {
                               hasAsteriskInText = true;
-                              console.log('[Luma Auto Register] Found required label with asterisk in container: "' + labelText.substring(0, 100) + '"');
+                              console.log('[Event Auto Register] Found required label with asterisk in container: "' + labelText.substring(0, 100) + '"');
                               break;
                             }
                           }
@@ -4310,18 +6422,18 @@ class RegistrationManager {
                               targetElement = nearbyInput;
                             } else {
                               // No input found - this is likely not a dropdown, skip it
-                              console.log('[Luma Auto Register] Skipping element with "Select one or more" - no associated input found (likely not a form element)');
+                              console.log('[Event Auto Register] Skipping element with "Select one or more" - no associated input found (likely not a form element)');
                               continue;
                             }
                           } else {
                             // No parent and no input - skip
-                            console.log('[Luma Auto Register] Skipping element with "Select one or more" - no associated input found');
+                            console.log('[Event Auto Register] Skipping element with "Select one or more" - no associated input found');
                             continue;
                           }
                         }
                       }
 
-                      console.log('[Luma Auto Register] ✓ Found dropdown with "Select one or more" by text search:');
+                      console.log('[Event Auto Register] ✓ Found dropdown with "Select one or more" by text search:');
                       console.log('  Tag:', elem.tagName);
                       console.log('  Class:', elem.className);
                       console.log('  Text:', (elem.textContent || '').trim().substring(0, 150));
@@ -4349,7 +6461,7 @@ class RegistrationManager {
                               directLabelLower !== 'email' && directLabelLower !== 'email *') {
                             labelText = directLabel;
                             useElemAsTarget = true; // The elem itself is the dropdown trigger!
-                            console.log('[Luma Auto Register] Extracted label directly from element text: "' + labelText + '" (will use elem as target)');
+                            console.log('[Event Auto Register] Extracted label directly from element text: "' + labelText + '" (will use elem as target)');
                           }
                         }
                       }
@@ -4435,9 +6547,9 @@ class RegistrationManager {
                                 fieldLabelText.indexOf('ecosystem') > -1;
                               var hasQuestionWord = 
                                 fieldLabelText.indexOf('what') > -1 ||
-                                fieldLabelText.indexOf('which') > -1 ||
-                                fieldLabelText.indexOf('how') > -1 ||
-                                fieldLabelText.indexOf('who') > -1 ||
+                                  fieldLabelText.indexOf('which') > -1 ||
+                                  fieldLabelText.indexOf('how') > -1 ||
+                                  fieldLabelText.indexOf('who') > -1 ||
                                 fieldLabelText.indexOf('where') > -1;
                               if (fieldLabelText.length > 5 && fieldLabelText.length < 200 &&
                                 (fieldLabelText.indexOf('*') > -1 || fieldLabelHTML.indexOf('*') > -1 || fieldLabelHTML.indexOf('&#42;') > -1) &&
@@ -4493,9 +6605,9 @@ class RegistrationManager {
                                   candidateText.indexOf('ecosystem') > -1;
                                 var hasQuestion3 = 
                                   candidateText.indexOf('what') > -1 ||
-                                  candidateText.indexOf('which') > -1 ||
-                                  candidateText.indexOf('how') > -1 ||
-                                  candidateText.indexOf('who') > -1 ||
+                                    candidateText.indexOf('which') > -1 ||
+                                    candidateText.indexOf('how') > -1 ||
+                                    candidateText.indexOf('who') > -1 ||
                                   candidateText.indexOf('where') > -1;
                                 // Must be a valid label with asterisk, above the input, and reasonably close
                                 if (isAboveInput &&
@@ -4550,9 +6662,9 @@ class RegistrationManager {
                               parentLabelText.indexOf('ecosystem') > -1;
                             var hasQuestionWord2 = 
                               parentLabelText.indexOf('what') > -1 ||
-                              parentLabelText.indexOf('which') > -1 ||
-                              parentLabelText.indexOf('how') > -1 ||
-                              parentLabelText.indexOf('who') > -1 ||
+                                parentLabelText.indexOf('which') > -1 ||
+                                parentLabelText.indexOf('how') > -1 ||
+                                parentLabelText.indexOf('who') > -1 ||
                               parentLabelText.indexOf('where') > -1;
                             if (parentLabelText.length > 5 && parentLabelText.length < 200 &&
                               (parentLabelText.indexOf('*') > -1 || parentLabelHTML.indexOf('*') > -1 || parentLabelHTML.indexOf('&#42;') > -1) &&
@@ -4651,14 +6763,14 @@ class RegistrationManager {
                       // If we somehow end up with an empty label (only "Select one or more"),
                       // skip this wrapper - we'll rely on more specific elements.
                       if (!labelTextLower || labelTextLower.length < 5) {
-                        console.log('[Luma Auto Register] Skipping unlabeled "Select one or more" dropdown wrapper');
+                        console.log('[Event Auto Register] Skipping unlabeled "Select one or more" dropdown wrapper');
                         continue;
                       }
 
                       // If label is still too long or contains multiple field names, it's probably wrong
                       if (labelTextLower.length > 200 ||
                         (labelTextLower.indexOf('name') > -1 && labelTextLower.indexOf('email') > -1 && labelTextLower.indexOf('industry') > -1)) {
-                        console.log('[Luma Auto Register] Skipping overly long or multi-field "Select one or more" label: ' + labelTextLower.substring(0, 120));
+                        console.log('[Event Auto Register] Skipping overly long or multi-field "Select one or more" label: ' + labelTextLower.substring(0, 120));
                         continue;
                       }
 
@@ -4676,12 +6788,12 @@ class RegistrationManager {
                         // Also check by ID or name to avoid duplicates
                         if (targetElementId && existingElement.id === targetElementId) {
                           alreadyAdded = true;
-                          console.log('[Luma Auto Register] Dropdown already in list (by ID): ' + targetElementId);
+                          console.log('[Event Auto Register] Dropdown already in list (by ID): ' + targetElementId);
                           break;
                         }
                         if (targetElementName && existingElement.name === targetElementName) {
                           alreadyAdded = true;
-                          console.log('[Luma Auto Register] Dropdown already in list (by name): ' + targetElementName);
+                          console.log('[Event Auto Register] Dropdown already in list (by name): ' + targetElementName);
                           break;
                         }
                       }
@@ -4712,21 +6824,21 @@ class RegistrationManager {
                           labelTextLower.indexOf('experience') === -1);
 
                       if (isInvalidLabel) {
-                        console.log('[Luma Auto Register] Skipping dropdown with invalid label: "' + labelTextLower + '"');
+                        console.log('[Event Auto Register] Skipping dropdown with invalid label: "' + labelTextLower + '"');
                         continue;
                       }
 
                       if (!alreadyAdded && !isInvalidLabel) {
                         // Use elem as target if we extracted label directly from it (it's the actual dropdown trigger)
                         var elementToUse = useElemAsTarget ? elem : targetElement;
-                        console.log('[Luma Auto Register] ✓ Adding dropdown with "Select one or more" to process list: "' + labelTextLower + '" (using ' + (useElemAsTarget ? 'elem' : 'targetElement') + ' as target: ' + elementToUse.tagName + ')');
+                        console.log('[Event Auto Register] ✓ Adding dropdown with "Select one or more" to process list: "' + labelTextLower + '" (using ' + (useElemAsTarget ? 'elem' : 'targetElement') + ' as target: ' + elementToUse.tagName + ')');
                         customDropdownsToProcess.push({
                           element: elementToUse,
                           label: labelTextLower,
                           isMultiSelect: true // Mark as multi-select, but we'll handle Yes/No cases
                         });
                       } else if (alreadyAdded) {
-                        console.log('[Luma Auto Register] Dropdown already in list, skipping duplicate');
+                        console.log('[Event Auto Register] Dropdown already in list, skipping duplicate');
                       }
                     }
                   }
@@ -4750,7 +6862,7 @@ class RegistrationManager {
                       (elem.innerHTML || '').indexOf('&#42;') > -1;
 
                     if (hasAsteriskInText) {
-                      console.log('[Luma Auto Register] ✓ Found multi-select dropdown by text search:');
+                      console.log('[Event Auto Register] ✓ Found multi-select dropdown by text search:');
                       console.log('  Tag:', elem.tagName);
                       console.log('  Class:', elem.className);
                       console.log('  Text:', (elem.textContent || '').trim().substring(0, 100));
@@ -4775,7 +6887,7 @@ class RegistrationManager {
                       }
 
                       if (!alreadyAdded) {
-                        console.log('[Luma Auto Register] ✓ Adding multi-select dropdown to process list');
+                        console.log('[Event Auto Register] ✓ Adding multi-select dropdown to process list');
                         customDropdownsToProcess.push({
                           element: targetElement,
                           label: labelTextLower,
@@ -4790,11 +6902,11 @@ class RegistrationManager {
                 for (var d = 0; d < customDropdowns.length; d++) {
                   var dropdown = customDropdowns[d];
 
-                  console.log('[Luma Auto Register]   CustomDropdown ' + d + ': tagName=' + dropdown.tagName + ', role=' + (dropdown.getAttribute('role') || 'none') + ', className=' + (dropdown.className || '').substring(0, 50));
+                  console.log('[Event Auto Register]   CustomDropdown ' + d + ': tagName=' + dropdown.tagName + ', role=' + (dropdown.getAttribute('role') || 'none') + ', className=' + (dropdown.className || '').substring(0, 50));
 
                   // Skip if not visible or disabled
                   if (!dropdown.offsetParent || dropdown.disabled) {
-                    console.log('[Luma Auto Register]   CustomDropdown ' + d + ': Skipped (not visible or disabled)');
+                    console.log('[Event Auto Register]   CustomDropdown ' + d + ': Skipped (not visible or disabled)');
                     continue;
                   }
 
@@ -4859,7 +6971,7 @@ class RegistrationManager {
 
                   if (labelEl) {
                     dropdownLabel = (labelEl.textContent || '').toLowerCase();
-                    console.log('[Luma Auto Register]   CustomDropdown ' + d + ': Found label from labelEl: "' + dropdownLabel + '"');
+                    console.log('[Event Auto Register]   CustomDropdown ' + d + ': Found label from labelEl: "' + dropdownLabel + '"');
                   }
 
                   // If no label found, look in parent container
@@ -4881,7 +6993,7 @@ class RegistrationManager {
                               prevText.indexOf('select') > -1)) {
                             dropdownLabel = prevText;
                             labelEl = prevElem;
-                            console.log('[Luma Auto Register]   CustomDropdown ' + d + ': Found label from parent container: "' + dropdownLabel + '"');
+                            console.log('[Event Auto Register]   CustomDropdown ' + d + ': Found label from parent container: "' + dropdownLabel + '"');
                             break;
                           }
                         }
@@ -4890,7 +7002,7 @@ class RegistrationManager {
                   }
 
                   if (!dropdownLabel || dropdownLabel.length < 5) {
-                    console.log('[Luma Auto Register]   CustomDropdown ' + d + ': No label found');
+                    console.log('[Event Auto Register]   CustomDropdown ' + d + ': No label found');
                   }
 
                   // IMPORTANT: Skip if label contains checkbox-related text (like "agree", "terms", etc.)
@@ -4952,27 +7064,27 @@ class RegistrationManager {
                     isMultiSelectDropdown = true;
                   }
 
-                  console.log('[Luma Auto Register]   CustomDropdown ' + d + ': hasAsterisk=' + hasAsterisk + ', isMultiSelect=' + isMultiSelectDropdown + ', placeholder="' + dropdownPlaceholder + '"');
+                  console.log('[Event Auto Register]   CustomDropdown ' + d + ': hasAsterisk=' + hasAsterisk + ', isMultiSelect=' + isMultiSelectDropdown + ', placeholder="' + dropdownPlaceholder + '"');
 
                   if (hasAsterisk) {
-                    console.log('[Luma Auto Register] ✓ Found custom dropdown from customDropdowns array: label="' + dropdownLabel + '", multiSelect=' + isMultiSelectDropdown);
+                    console.log('[Event Auto Register] ✓ Found custom dropdown from customDropdowns array: label="' + dropdownLabel + '", multiSelect=' + isMultiSelectDropdown);
                     customDropdownsToProcess.push({
                       element: dropdown,
                       label: dropdownLabel,
                       isMultiSelect: isMultiSelectDropdown
                     });
                   } else {
-                    console.log('[Luma Auto Register]   CustomDropdown ' + d + ': Skipped (not required - no asterisk found)');
+                    console.log('[Event Auto Register]   CustomDropdown ' + d + ': Skipped (not required - no asterisk found)');
                   }
                 }
 
-                console.log('[Luma Auto Register] Found ' + customDropdownsToProcess.length + ' required custom dropdowns to process');
+                console.log('[Event Auto Register] Found ' + customDropdownsToProcess.length + ' required custom dropdowns to process');
 
-                console.log('[Luma Auto Register] Summary: ' + fieldsToFill.length + ' fields to fill, ' + requiresManualCount + ' need manual input');
+                console.log('[Event Auto Register] Summary: ' + fieldsToFill.length + ' fields to fill, ' + requiresManualCount + ' need manual input');
 
                 // If we have fields that require manual input and user wants to skip
                 if (requiresManualCount > 0 && settings.skipManualFields) {
-                  console.log('[Luma Auto Register] ⚠️ Skipping - ' + requiresManualCount + ' fields require manual input');
+                  console.log('[Event Auto Register] ⚠️ Skipping - ' + requiresManualCount + ' fields require manual input');
                   resolve({
                     success: false,
                     message: 'Skipped: Requires ' + requiresManualCount + ' manual fields',
@@ -4985,7 +7097,7 @@ class RegistrationManager {
                 // In this scenario we can never fully auto-complete the form, so
                 // immediately mark it as needing manual input instead of timing out.
                 if (requiresManualCount > 0 && (!settings.phone || !settings.phone.trim())) {
-                  console.log('[Luma Auto Register] ⚠️ Required phone field cannot be auto-filled because no phone number is set in extension settings.');
+                  console.log('[Event Auto Register] ⚠️ Required phone field cannot be auto-filled because no phone number is set in extension settings.');
                   resolve({
                     success: false,
                     message: 'Required phone number missing in settings – manual registration required',
@@ -4996,7 +7108,7 @@ class RegistrationManager {
 
                 // Fill all fields we can
                 // CRITICAL: Fill fields sequentially with delays to avoid overwhelming React
-                console.log('[Luma Auto Register] === FILLING FIELDS ===');
+                console.log('[Event Auto Register] === FILLING FIELDS ===');
 
                 (function fillFieldSequentially(index) {
                   if (index >= fieldsToFill.length) {
@@ -5013,7 +7125,7 @@ class RegistrationManager {
 
                     // Verify the option was actually selected
                     if (field.input.value !== field.value) {
-                      console.log('[Luma Auto Register] ⚠️ Warning: Could not set select value. Expected: "' + field.value + '", Got: "' + field.input.value + '"');
+                      console.log('[Event Auto Register] ⚠️ Warning: Could not set select value. Expected: "' + field.value + '", Got: "' + field.input.value + '"');
                     }
 
                     // Trigger events for React forms
@@ -5021,7 +7133,7 @@ class RegistrationManager {
                     field.input.dispatchEvent(new Event('input', { bubbles: true }));
                     field.input.dispatchEvent(new Event('blur', { bubbles: true }));
 
-                    console.log('[Luma Auto Register] ✓ Filled dropdown: ' + field.description + ' → "' + field.value + '"');
+                    console.log('[Event Auto Register] ✓ Filled dropdown: ' + field.description + ' → "' + field.value + '"');
                   } else if (field.isPhone) {
                     // Special handling for phone fields - use React-controlled component approach
                     // Phone fields are often React controlled, so we need to use the same approach as text fields
@@ -5068,7 +7180,7 @@ class RegistrationManager {
                             // Call React's onChange handler
                             onChange(syntheticEvent);
                             valueSet = true;
-                            console.log('[Luma Auto Register] Set phone value via React onChange handler');
+                            console.log('[Event Auto Register] Set phone value via React onChange handler');
                           }
                         }
                       }
@@ -5110,7 +7222,7 @@ class RegistrationManager {
 
                         valueSet = true;
                       } catch (nativeError) {
-                        console.log('[Luma Auto Register] ⚠️ Error setting phone value via native setter: ' + nativeError.message);
+                        console.log('[Event Auto Register] ⚠️ Error setting phone value via native setter: ' + nativeError.message);
                       }
                     }
 
@@ -5137,7 +7249,7 @@ class RegistrationManager {
                             inputEl.dispatchEvent(changeEvent);
 
                             inputEl.dispatchEvent(new Event('blur', { bubbles: true }));
-                            console.log('[Luma Auto Register] ✓ Filled phone field: ' + description + ' → "' + valueStr + '"');
+                            console.log('[Event Auto Register] ✓ Filled phone field: ' + description + ' → "' + valueStr + '"');
                             return;
                           }
 
@@ -5161,12 +7273,12 @@ class RegistrationManager {
                       // Value was set via React or native setter, verify it
                       var finalPhoneValue = inputEl.value;
                       if (finalPhoneValue !== phoneValueStr) {
-                        console.log('[Luma Auto Register] ⚠️ Warning: Phone value mismatch. Expected: "' + phoneValueStr + '", Got: "' + finalPhoneValue + '"');
+                        console.log('[Event Auto Register] ⚠️ Warning: Phone value mismatch. Expected: "' + phoneValueStr + '", Got: "' + finalPhoneValue + '"');
                         // Try setting again
                         inputEl.value = phoneValueStr;
                         inputEl.dispatchEvent(new Event('input', { bubbles: true }));
                       } else {
-                        console.log('[Luma Auto Register] ✓ Filled phone field: ' + field.description + ' → "' + phoneValueStr + '" (verified)');
+                        console.log('[Event Auto Register] ✓ Filled phone field: ' + field.description + ' → "' + phoneValueStr + '" (verified)');
                       }
                     }
                   } else {
@@ -5217,7 +7329,7 @@ class RegistrationManager {
                             // Call React's onChange handler
                             onChange(syntheticEvent);
                             valueSet = true;
-                            console.log('[Luma Auto Register] Set value via React onChange handler');
+                            console.log('[Event Auto Register] Set value via React onChange handler');
                           }
                         }
                       }
@@ -5260,7 +7372,7 @@ class RegistrationManager {
 
                         valueSet = true;
                       } catch (nativeError) {
-                        console.log('[Luma Auto Register] ⚠️ Error setting value via native setter: ' + nativeError.message);
+                        console.log('[Event Auto Register] ⚠️ Error setting value via native setter: ' + nativeError.message);
                       }
                     }
 
@@ -5278,12 +7390,12 @@ class RegistrationManager {
                     // Verify the value was set
                     var finalValue = inputEl.value;
                     if (finalValue !== valueToSet) {
-                      console.log('[Luma Auto Register] ⚠️ Warning: Value mismatch. Expected: "' + valueToSet + '", Got: "' + finalValue + '"');
+                      console.log('[Event Auto Register] ⚠️ Warning: Value mismatch. Expected: "' + valueToSet + '", Got: "' + finalValue + '"');
                       // Last resort: try setting again
                       inputEl.value = valueToSet;
                       inputEl.dispatchEvent(new Event('input', { bubbles: true }));
                     } else {
-                      console.log('[Luma Auto Register] ✓ Filled: ' + field.description + ' → "' + valueToSet + '" (verified)');
+                      console.log('[Event Auto Register] ✓ Filled: ' + field.description + ' → "' + valueToSet + '" (verified)');
                     }
                   }
 
@@ -5294,7 +7406,7 @@ class RegistrationManager {
                   }, 100);
                 })(0);
 
-                console.log('[Luma Auto Register] Waiting for React to validate fields...');
+                console.log('[Event Auto Register] Waiting for React to validate fields...');
 
                 // CRITICAL: Add delay after filling fields to let React process the values
                 // React needs time to update its internal state before form submission
@@ -5304,8 +7416,8 @@ class RegistrationManager {
                 // Process custom dropdowns sequentially
                 // IMPORTANT: Submit button search will be triggered AFTER dropdowns finish
                 if (customDropdownsToProcess.length > 0) {
-                  console.log('[Luma Auto Register] === PROCESSING CUSTOM DROPDOWNS ===');
-                  console.log('[Luma Auto Register] Will search for submit button after all dropdowns are processed');
+                  console.log('[Event Auto Register] === PROCESSING CUSTOM DROPDOWNS ===');
+                  console.log('[Event Auto Register] Will search for submit button after all dropdowns are processed');
 
                   // Track which logical questions we've already handled so we don't
                   // reopen the same multi-select multiple times (common with deeply
@@ -5315,7 +7427,7 @@ class RegistrationManager {
                   // Process each dropdown with a delay between them
                   function processCustomDropdown(index) {
                     if (index >= customDropdownsToProcess.length) {
-                      console.log('[Luma Auto Register] Finished processing custom dropdowns');
+                      console.log('[Event Auto Register] Finished processing custom dropdowns');
 
                       // Re-scan for conditional dropdowns that might have appeared after selections
                       // Some dropdowns only appear after certain options are selected (e.g., "If you are an investor...")
@@ -5323,11 +7435,11 @@ class RegistrationManager {
                       setTimeout(function () {
                         // Check if form has already been submitted (prevent re-scanning after submit)
                         if (typeof window !== 'undefined' && window.__lumaFormSubmitted) {
-                          console.log('[Luma Auto Register] Form already submitted, skipping re-scanning to avoid interference');
+                          console.log('[Event Auto Register] Form already submitted, skipping re-scanning to avoid interference');
                           return;
                         }
 
-                        console.log('[Luma Auto Register] === RE-SCANNING FOR CONDITIONAL DROPDOWNS ===');
+                        console.log('[Event Auto Register] === RE-SCANNING FOR CONDITIONAL DROPDOWNS ===');
 
                         // Look for any new "Select one or more" dropdowns that weren't detected before
                         // Use a more targeted query instead of querySelectorAll('*') to avoid expensive DOM traversal
@@ -5423,7 +7535,7 @@ class RegistrationManager {
                                   labelText = (elem.textContent || '').trim().replace(/select one or more.*$/i, '').replace(/this field is required.*$/i, '').trim();
                                 }
 
-                                console.log('[Luma Auto Register] ✓ Found conditional dropdown: "' + labelText.substring(0, 100) + '"');
+                                console.log('[Event Auto Register] ✓ Found conditional dropdown: "' + labelText.substring(0, 100) + '"');
                                 newConditionalDropdowns.push({
                                   element: targetElement,
                                   label: labelText.toLowerCase(),
@@ -5436,7 +7548,7 @@ class RegistrationManager {
 
                         // Process any new conditional dropdowns found
                         if (newConditionalDropdowns.length > 0) {
-                          console.log('[Luma Auto Register] Found ' + newConditionalDropdowns.length + ' conditional dropdown(s) to process');
+                          console.log('[Event Auto Register] Found ' + newConditionalDropdowns.length + ' conditional dropdown(s) to process');
                           // Add them to the processing queue
                           for (var newDrop = 0; newDrop < newConditionalDropdowns.length; newDrop++) {
                             customDropdownsToProcess.push(newConditionalDropdowns[newDrop]);
@@ -5444,7 +7556,7 @@ class RegistrationManager {
                           // Process them
                           processCustomDropdown(customDropdownsToProcess.length - newConditionalDropdowns.length);
                         } else {
-                          console.log('[Luma Auto Register] No new conditional dropdowns found');
+                          console.log('[Event Auto Register] No new conditional dropdowns found');
                           // Re-scanning complete, now trigger submit button search
                           // This ensures re-scanning doesn't interfere with form submission
                           if (typeof window !== 'undefined') {
@@ -5472,11 +7584,11 @@ class RegistrationManager {
 
                         // Check if we should check it (required OR autoAcceptTerms enabled)
                         if (isRequired || settings.autoAcceptTerms) {
-                          console.log('[Luma Auto Register] === ACCEPTING TERMS (after all fields filled) ===');
+                          console.log('[Event Auto Register] === ACCEPTING TERMS (after all fields filled) ===');
                           if (isRequired) {
-                            console.log('[Luma Auto Register] Terms checkbox is required (has asterisk), checking it');
+                            console.log('[Event Auto Register] Terms checkbox is required (has asterisk), checking it');
                           } else {
-                            console.log('[Luma Auto Register] Auto-accept terms is enabled, checking it');
+                            console.log('[Event Auto Register] Auto-accept terms is enabled, checking it');
                           }
 
                           // Add a passive observer to track when checkbox changes (for debugging)
@@ -5485,11 +7597,11 @@ class RegistrationManager {
                             mutations.forEach(function (mutation) {
                               if (mutation.attributeName === 'checked' || mutation.type === 'attributes') {
                                 var currentChecked = termsCheckbox.checked;
-                                console.log('[Luma Auto Register] 🔍 DEBUG: Terms checkbox state changed to: ' + currentChecked + ' (attribute: ' + mutation.attributeName + ')');
+                                console.log('[Event Auto Register] 🔍 DEBUG: Terms checkbox state changed to: ' + currentChecked + ' (attribute: ' + mutation.attributeName + ')');
 
                                 // Log stack trace to see what's changing it
                                 if (!currentChecked) {
-                                  console.log('[Luma Auto Register] 🔍 DEBUG: Checkbox was unchecked! Stack trace:');
+                                  console.log('[Event Auto Register] 🔍 DEBUG: Checkbox was unchecked! Stack trace:');
                                   console.trace();
                                 }
                               }
@@ -5510,22 +7622,22 @@ class RegistrationManager {
 
                           // Check the checkbox once - no observers or periodic checks needed
                           if (!termsCheckbox.checked) {
-                            console.log('[Luma Auto Register] Checking terms checkbox via helper (after all fields filled)');
+                            console.log('[Event Auto Register] Checking terms checkbox via helper (after all fields filled)');
                             reliablyCheckCheckbox(termsCheckbox, 'terms checkbox');
                           } else {
-                            console.log('[Luma Auto Register] ✓ Terms checkbox already checked (current state: ' + termsCheckbox.checked + ')');
+                            console.log('[Event Auto Register] ✓ Terms checkbox already checked (current state: ' + termsCheckbox.checked + ')');
                           }
 
                           // Verify it stays checked after a brief delay
                           setTimeout(function () {
                             var stillChecked = termsCheckbox.checked;
-                            console.log('[Luma Auto Register] 🔍 DEBUG: Checkbox state after 500ms: ' + stillChecked);
+                            console.log('[Event Auto Register] 🔍 DEBUG: Checkbox state after 500ms: ' + stillChecked);
                             if (!stillChecked) {
-                              console.log('[Luma Auto Register] ⚠️ WARNING: Checkbox was unchecked! Something is interfering with it.');
+                              console.log('[Event Auto Register] ⚠️ WARNING: Checkbox was unchecked! Something is interfering with it.');
                             }
                           }, 500);
                         } else {
-                          console.log('[Luma Auto Register] Terms checkbox found but not required and autoAcceptTerms is disabled - skipping');
+                          console.log('[Event Auto Register] Terms checkbox found but not required and autoAcceptTerms is disabled - skipping');
                         }
                       }
 
@@ -5545,12 +7657,12 @@ class RegistrationManager {
                           }
 
                           if (isRequired || settings.autoAcceptTerms) {
-                            console.log('[Luma Auto Register] === ACCEPTING TERMS (no dropdowns to process) ===');
+                            console.log('[Event Auto Register] === ACCEPTING TERMS (no dropdowns to process) ===');
                             if (!termsCheckbox.checked) {
-                              console.log('[Luma Auto Register] Checking terms checkbox via helper (no dropdowns path)');
+                              console.log('[Event Auto Register] Checking terms checkbox via helper (no dropdowns path)');
                               reliablyCheckCheckbox(termsCheckbox, 'terms checkbox');
                             } else {
-                              console.log('[Luma Auto Register] ✓ Terms checkbox already checked');
+                              console.log('[Event Auto Register] ✓ Terms checkbox already checked');
                             }
                           }
                         }
@@ -5573,7 +7685,7 @@ class RegistrationManager {
                                   (current.indexOf('+') === 0 && current.replace(/\D/g, '').length <= 2);
 
                                 if (isEffectivelyEmpty || current !== finalPhone) {
-                                  console.log('[Luma Auto Register] Ensuring phone field is filled before submit. Current="' + current + '" placeholder="' + placeholder + '"');
+                                  console.log('[Event Auto Register] Ensuring phone field is filled before submit. Current="' + current + '" placeholder="' + placeholder + '"');
                                   pEl.value = finalPhone;
                                   pEl.dispatchEvent(new Event('input', { bubbles: true }));
                                   pEl.dispatchEvent(new Event('change', { bubbles: true }));
@@ -5582,16 +7694,16 @@ class RegistrationManager {
                               }
                             }
                           } catch (phoneCheckError) {
-                            console.log('[Luma Auto Register] Could not run final phone check: ' + phoneCheckError.message);
+                            console.log('[Event Auto Register] Could not run final phone check: ' + phoneCheckError.message);
                           }
 
-                          console.log('[Luma Auto Register] === LOOKING FOR SUBMIT BUTTON ===');
+                          console.log('[Event Auto Register] === LOOKING FOR SUBMIT BUTTON ===');
 
                           // First try to find buttons in modals/dialogs (they're usually the submit buttons we want)
                           var modalButtons = document.querySelectorAll('[role="dialog"] button, .modal button, [class*="modal"] button');
                           var allButtons = document.querySelectorAll('button, input[type="submit"], a[role="button"]');
 
-                          console.log('[Luma Auto Register] Found ' + modalButtons.length + ' modal buttons, ' + allButtons.length + ' total buttons');
+                          console.log('[Event Auto Register] Found ' + modalButtons.length + ' modal buttons, ' + allButtons.length + ' total buttons');
 
                           var submitBtn = null;
                           var submitKeywords = ['request to join', 'submit', 'register', 'confirm', 'rsvp', 'join', 'continue', 'next', 'send'];
@@ -5608,7 +7720,7 @@ class RegistrationManager {
                             // Combine all text sources
                             var allText = text + ' ' + ariaLabel + ' ' + title;
 
-                            console.log('[Luma Auto Register] ' + source + ' Button ' + index + ': "' + text + '"' +
+                            console.log('[Event Auto Register] ' + source + ' Button ' + index + ': "' + text + '"' +
                               ' aria="' + ariaLabel + '" title="' + title + '"' + disabled + visible + ' (type: ' + type + ')');
 
                             // Check if button text/label contains any submit keywords
@@ -5618,13 +7730,13 @@ class RegistrationManager {
                                 if (btn.offsetParent !== null && !btn.disabled) {
                                   // Prefer buttons with actual text over empty buttons
                                   if (text.length > 0 || ariaLabel.length > 0 || type === 'submit') {
-                                    console.log('[Luma Auto Register] ✓✓✓ MATCHED KEYWORD: "' + submitKeywords[k] + '" or type=submit');
+                                    console.log('[Event Auto Register] ✓✓✓ MATCHED KEYWORD: "' + submitKeywords[k] + '" or type=submit');
                                     return btn;
                                   }
                                 } else if (btn.disabled) {
-                                  console.log('[Luma Auto Register] ⚠️ Matched but disabled: "' + (text || ariaLabel || type) + '"');
+                                  console.log('[Event Auto Register] ⚠️ Matched but disabled: "' + (text || ariaLabel || type) + '"');
                                 } else {
-                                  console.log('[Luma Auto Register] ⚠️ Matched but hidden: "' + (text || ariaLabel || type) + '"');
+                                  console.log('[Event Auto Register] ⚠️ Matched but hidden: "' + (text || ariaLabel || type) + '"');
                                 }
                               }
                             }
@@ -5632,7 +7744,7 @@ class RegistrationManager {
                           }
 
                           // First check modal buttons (highest priority)
-                          console.log('[Luma Auto Register] Checking modal buttons first...');
+                          console.log('[Event Auto Register] Checking modal buttons first...');
                           var bestButton = null;
                           var bestButtonScore = 0; // Prefer buttons with text over empty ones
 
@@ -5648,7 +7760,7 @@ class RegistrationManager {
                               if (score > bestButtonScore) {
                                 bestButton = found;
                                 bestButtonScore = score;
-                                console.log('[Luma Auto Register] New best button with score: ' + score);
+                                console.log('[Event Auto Register] New best button with score: ' + score);
                               }
                             }
                           }
@@ -5657,7 +7769,7 @@ class RegistrationManager {
 
                           // If not found in modal, check all buttons
                           if (!submitBtn) {
-                            console.log('[Luma Auto Register] No modal button found, checking all buttons...');
+                            console.log('[Event Auto Register] No modal button found, checking all buttons...');
                             for (var i = 0; i < allButtons.length; i++) {
                               var found = checkButton(allButtons[i], i, 'ALL');
                               if (found) {
@@ -5668,8 +7780,8 @@ class RegistrationManager {
                           }
 
                           if (!submitBtn) {
-                            console.log('[Luma Auto Register] ✗✗✗ NO SUBMIT BUTTON FOUND');
-                            console.log('[Luma Auto Register] This might be a one-click registration, checking status...');
+                            console.log('[Event Auto Register] ✗✗✗ NO SUBMIT BUTTON FOUND');
+                            console.log('[Event Auto Register] This might be a one-click registration, checking status...');
 
                             // Check if auto-registered
                             setTimeout(function () {
@@ -5687,13 +7799,13 @@ class RegistrationManager {
                                 bodyTextLower.indexOf("thanks for joining") > -1;
 
                               if (success) {
-                                console.log('[Luma Auto Register] ✓ Auto-registered successfully!');
+                                console.log('[Event Auto Register] ✓ Auto-registered successfully!');
                                 resolve({
                                   success: true,
                                   message: 'Registered successfully (one-click)'
                                 });
                               } else {
-                                console.log('[Luma Auto Register] ✗ No submit button and not auto-registered');
+                                console.log('[Event Auto Register] ✗ No submit button and not auto-registered');
                                 resolve({
                                   success: false,
                                   message: 'Could not find submit button - please register manually'
@@ -5704,15 +7816,15 @@ class RegistrationManager {
                           }
 
                           // FOUND THE SUBMIT BUTTON!
-                          console.log('[Luma Auto Register] ✓✓✓ FOUND SUBMIT BUTTON: "' + submitBtn.textContent.trim() + '"');
-                          console.log('[Luma Auto Register] Button disabled status: ' + submitBtn.disabled);
+                          console.log('[Event Auto Register] ✓✓✓ FOUND SUBMIT BUTTON: "' + submitBtn.textContent.trim() + '"');
+                          console.log('[Event Auto Register] Button disabled status: ' + submitBtn.disabled);
 
                           // Check if button is disabled - if so, wait a bit for it to enable
                           if (submitBtn.disabled) {
-                            console.log('[Luma Auto Register] ⚠️ Button is disabled, waiting 1.5 seconds for validation...');
+                            console.log('[Event Auto Register] ⚠️ Button is disabled, waiting 1.5 seconds for validation...');
                             setTimeout(function () {
                               if (submitBtn.disabled) {
-                                console.log('[Luma Auto Register] ✗ Button still disabled after waiting');
+                                console.log('[Event Auto Register] ✗ Button still disabled after waiting');
                                 resolve({
                                   success: false,
                                   message: 'Submit button disabled - form validation may have failed'
@@ -5729,7 +7841,7 @@ class RegistrationManager {
                                   if (submitText2.indexOf('request to join') > -1 ||
                                     submitText2.indexOf('submit') > -1 ||
                                     submitText2.indexOf('register') > -1) {
-                                    console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
+                                    console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
 
                                     // Try to find the form element and submit it directly
                                     var formElement2 = submitBtn2.closest('form');
@@ -5769,14 +7881,14 @@ class RegistrationManager {
                               }
 
                               // Button is now enabled, click it!
-                              console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON ===');
-                              console.log('[Luma Auto Register] Button text: "' + submitBtn.textContent + '"');
-                              console.log('[Luma Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
-                              console.log('[Luma Auto Register] Button type: ' + (submitBtn.type || 'none'));
+                              console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON ===');
+                              console.log('[Event Auto Register] Button text: "' + submitBtn.textContent + '"');
+                              console.log('[Event Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
+                              console.log('[Event Auto Register] Button type: ' + (submitBtn.type || 'none'));
 
                               // FINAL CHECK: Ensure terms checkbox is checked before submitting
                               if (termsCheckbox && !termsCheckbox.checked) {
-                                console.log('[Luma Auto Register] ⚠️ Terms checkbox unchecked before final submit, checking now...');
+                                console.log('[Event Auto Register] ⚠️ Terms checkbox unchecked before final submit, checking now...');
                                 reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (final pre-submit)');
                                 // Wait a moment for checkbox to be processed
                                 setTimeout(function () {
@@ -5790,7 +7902,7 @@ class RegistrationManager {
                                   submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                   submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                                  console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                                  console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
                                 }, 200);
                                 return;
                               }
@@ -5815,15 +7927,15 @@ class RegistrationManager {
 
                               // Try multiple submission methods
                               if (formElement) {
-                                console.log('[Luma Auto Register] Found form element, submitting directly...');
+                                console.log('[Event Auto Register] Found form element, submitting directly...');
                                 try {
                                   formElement.requestSubmit(submitBtn);
                                 } catch (e) {
-                                  console.log('[Luma Auto Register] requestSubmit failed, trying submit()...');
+                                  console.log('[Event Auto Register] requestSubmit failed, trying submit()...');
                                   try {
                                     formElement.submit();
                                   } catch (e2) {
-                                    console.log('[Luma Auto Register] submit() failed, falling back to button click...');
+                                    console.log('[Event Auto Register] submit() failed, falling back to button click...');
                                   }
                                 }
                               }
@@ -5840,17 +7952,17 @@ class RegistrationManager {
                                 formElement.dispatchEvent(submitEvent);
                               }
 
-                              console.log('[Luma Auto Register] ✓ Submit attempted (form submit + button click)!');
+                              console.log('[Event Auto Register] ✓ Submit attempted (form submit + button click)!');
 
                               // Check for terms modal that appears AFTER clicking submit (e.g., "Accept Terms" modal)
                               // Use multiple retries since the modal might appear with a delay
                               var checkPostSubmitModal = function (attempt) {
                                 attempt = attempt || 1;
                                 var maxAttempts = 5;
-                                var delay = attempt === 1 ? 500 : 1000; // First check after 500ms, then every 1s
+                                var delay = attempt === 1 ? 300 : 500; // First check after 300ms, then every 500ms
 
                                 setTimeout(function () {
-                                  console.log('[Luma Auto Register] === CHECKING FOR POST-SUBMIT TERMS MODAL (attempt ' + attempt + '/' + maxAttempts + ') ===');
+                                  console.log('[Event Auto Register] === CHECKING FOR POST-SUBMIT TERMS MODAL (attempt ' + attempt + '/' + maxAttempts + ') ===');
 
                                   // Reset the flag to allow checking again (since this is a new modal after submit)
                                   if (typeof window !== 'undefined') {
@@ -5858,7 +7970,7 @@ class RegistrationManager {
                                   }
 
                                   if (handleTermsModal(function () {
-                                    console.log('[Luma Auto Register] ✓ Post-submit terms modal handled successfully');
+                                    console.log('[Event Auto Register] ✓ Post-submit terms modal handled successfully');
                                     // After handling the modal, wait a bit then check the result
                                     setTimeout(function () {
                                       // Continue with result checking
@@ -5871,13 +7983,13 @@ class RegistrationManager {
 
                                   // If not found and we haven't reached max attempts, try again
                                   if (attempt < maxAttempts) {
-                                    console.log('[Luma Auto Register] No post-submit terms modal found yet (attempt ' + attempt + '), retrying...');
+                                    console.log('[Event Auto Register] No post-submit terms modal found yet (attempt ' + attempt + '), retrying...');
                                     checkPostSubmitModal(attempt + 1);
                                     return;
                                   }
 
                                   // No modal found after all attempts, continue with normal flow
-                                  console.log('[Luma Auto Register] No post-submit terms modal found after ' + maxAttempts + ' attempts, continuing...');
+                                  console.log('[Event Auto Register] No post-submit terms modal found after ' + maxAttempts + ' attempts, continuing...');
                                 }, delay);
                               };
 
@@ -5886,7 +7998,7 @@ class RegistrationManager {
 
                               // Define result checking function (called normally or after Cloudflare completes)
                               function checkRegistrationResultAfterCloudflare() {
-                                console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT ===');
+                                console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT ===');
                                 var bodyText = document.body.textContent;
 
                                 // Check for validation errors - prioritize red borders (most reliable)
@@ -5969,8 +8081,8 @@ class RegistrationManager {
                                 }
 
                                 if (hasValidationErrors) {
-                                  console.log('[Luma Auto Register] ⚠️ Validation errors detected! Missing fields: ' + fieldsWithErrors.join(', '));
-                                  console.log('[Luma Auto Register] === RE-SCANNING FOR MISSING FIELDS ===');
+                                  console.log('[Event Auto Register] ⚠️ Validation errors detected! Missing fields: ' + fieldsWithErrors.join(', '));
+                                  console.log('[Event Auto Register] === RE-SCANNING FOR MISSING FIELDS ===');
 
                                   // Re-scan for missing fields and try to fill them
                                   var allInputs2 = document.querySelectorAll('input, textarea, select');
@@ -6014,7 +8126,7 @@ class RegistrationManager {
                                           inpEl2.value = settings.genericAnswer1 || 'To be provided';
                                           inpEl2.dispatchEvent(new Event('input', { bubbles: true }));
                                           inpEl2.dispatchEvent(new Event('change', { bubbles: true }));
-                                          console.log('[Luma Auto Register] ✓ Filled missing field: ' + (label2 || 'unknown'));
+                                          console.log('[Event Auto Register] ✓ Filled missing field: ' + (label2 || 'unknown'));
                                           filledAny = true;
                                         }
                                       }
@@ -6049,7 +8161,7 @@ class RegistrationManager {
                                       ));
 
                                       if (cbIsRequired || isTerms2) {
-                                        console.log('[Luma Auto Register] Found unchecked required checkbox, checking it: ' + (cbLabel2 || 'unknown'));
+                                        console.log('[Event Auto Register] Found unchecked required checkbox, checking it: ' + (cbLabel2 || 'unknown'));
                                         reliablyCheckCheckbox(checkboxEl2, 'required checkbox');
                                         filledAny = true;
                                       }
@@ -6061,7 +8173,7 @@ class RegistrationManager {
                                     setTimeout(function () {
                                       // Final check: ensure terms checkbox is checked
                                       if (termsCheckbox && !termsCheckbox.checked) {
-                                        console.log('[Luma Auto Register] ⚠️ Terms checkbox unchecked before final submit, checking again...');
+                                        console.log('[Event Auto Register] ⚠️ Terms checkbox unchecked before final submit, checking again...');
                                         reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (final check)');
                                       }
 
@@ -6070,7 +8182,7 @@ class RegistrationManager {
                                       if (submitText3.indexOf('request to join') > -1 ||
                                         submitText3.indexOf('submit') > -1 ||
                                         submitText3.indexOf('register') > -1) {
-                                        console.log('[Luma Auto Register] Re-submitting after filling missing fields...');
+                                        console.log('[Event Auto Register] Re-submitting after filling missing fields...');
                                         submitBtn3.click();
                                         submitBtn3.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                         submitBtn3.dispatchEvent(new Event('submit', { bubbles: true }));
@@ -6087,35 +8199,35 @@ class RegistrationManager {
 
                           // Check for terms modal before submitting (only if not already handled)
                           var termsModalAlreadyHandled = (typeof window !== 'undefined' && window.__lumaTermsModalHandled);
-                          console.log('[Luma Auto Register] Terms modal handled flag: ' + termsModalAlreadyHandled);
+                          console.log('[Event Auto Register] Terms modal handled flag: ' + termsModalAlreadyHandled);
 
                           // Store the submitBtn in a closure so any callback can use it
                           var submitBtnToClick = submitBtn;
 
                           // Check for terms modal before submitting (only if not already handled)
                           if (!termsModalAlreadyHandled) {
-                            console.log('[Luma Auto Register] Terms modal not yet handled, checking...');
+                            console.log('[Event Auto Register] Terms modal not yet handled, checking...');
                             if (handleTermsModal(function () {
                               // After terms modal is handled, click the button we already found
-                              console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
-                              console.log('[Luma Auto Register] Using previously found button: "' + (submitBtnToClick ? submitBtnToClick.textContent.trim() : 'NOT FOUND') + '"');
+                              console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
+                              console.log('[Event Auto Register] Using previously found button: "' + (submitBtnToClick ? submitBtnToClick.textContent.trim() : 'NOT FOUND') + '"');
 
                               // Wait a moment for modal to fully close
                               setTimeout(function () {
                                 // Final check: ensure terms checkbox is checked before submitting
                                 if (termsCheckbox && !termsCheckbox.checked) {
-                                  console.log('[Luma Auto Register] ⚠️ Terms checkbox unchecked before submit, checking again...');
+                                  console.log('[Event Auto Register] ⚠️ Terms checkbox unchecked before submit, checking again...');
                                   reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (pre-submit)');
                                   // Wait a bit for the checkbox to be processed and verify it stays checked
                                   setTimeout(function () {
                                     // Final verification - check again right before clicking
                                     if (!termsCheckbox.checked) {
-                                      console.log('[Luma Auto Register] ⚠️ Terms checkbox still unchecked, forcing check one more time...');
+                                      console.log('[Event Auto Register] ⚠️ Terms checkbox still unchecked, forcing check one more time...');
                                       reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (final force)');
                                     }
 
                                     if (submitBtnToClick && submitBtnToClick.offsetParent !== null && !submitBtnToClick.disabled) {
-                                      console.log('[Luma Auto Register] Clicking submit button (after terms modal closed)...');
+                                      console.log('[Event Auto Register] Clicking submit button (after terms modal closed)...');
                                       // One more check right before clicking
                                       if (!termsCheckbox.checked) {
                                         termsCheckbox.checked = true;
@@ -6156,7 +8268,7 @@ class RegistrationManager {
                                         formElement3.dispatchEvent(submitEvent3);
                                       }
 
-                                      console.log('[Luma Auto Register] ✓ Submit button clicked (after terms modal)!');
+                                      console.log('[Event Auto Register] ✓ Submit button clicked (after terms modal)!');
                                     }
                                   }, 300);
                                   return;
@@ -6164,12 +8276,12 @@ class RegistrationManager {
 
                                 // Final verification before clicking
                                 if (!termsCheckbox.checked) {
-                                  console.log('[Luma Auto Register] ⚠️ Terms checkbox unchecked, checking one final time...');
+                                  console.log('[Event Auto Register] ⚠️ Terms checkbox unchecked, checking one final time...');
                                   reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (final check)');
                                 }
 
                                 if (submitBtnToClick && submitBtnToClick.offsetParent !== null && !submitBtnToClick.disabled) {
-                                  console.log('[Luma Auto Register] Clicking submit button (after terms modal closed)...');
+                                  console.log('[Event Auto Register] Clicking submit button (after terms modal closed)...');
                                   // One more check right before clicking
                                   if (!termsCheckbox.checked) {
                                     termsCheckbox.checked = true;
@@ -6193,14 +8305,14 @@ class RegistrationManager {
 
                                   // Try multiple submission methods
                                   if (formElement) {
-                                    console.log('[Luma Auto Register] Found form element, submitting directly...');
+                                    console.log('[Event Auto Register] Found form element, submitting directly...');
                                     try {
                                       formElement.requestSubmit(submitBtnToClick);
                                     } catch (e) {
                                       try {
                                         formElement.submit();
                                       } catch (e2) {
-                                        console.log('[Luma Auto Register] Form submit() failed, falling back to button click...');
+                                        console.log('[Event Auto Register] Form submit() failed, falling back to button click...');
                                       }
                                     }
                                   }
@@ -6215,16 +8327,16 @@ class RegistrationManager {
                                     formElement.dispatchEvent(submitEvent);
                                   }
 
-                                  console.log('[Luma Auto Register] ✓ Submit button clicked (after terms modal)!');
+                                  console.log('[Event Auto Register] ✓ Submit button clicked (after terms modal)!');
                                 } else {
                                   // Fallback: try to find button again
-                                  console.log('[Luma Auto Register] ⚠️ Previously found button not available, searching again...');
+                                  console.log('[Event Auto Register] ⚠️ Previously found button not available, searching again...');
                                   var submitBtn2 = document.querySelector('button[type="submit"], button:not([type])');
                                   var submitText2 = submitBtn2 ? submitBtn2.textContent.toLowerCase() : '';
                                   if (submitText2.indexOf('request to join') > -1 ||
                                     submitText2.indexOf('submit') > -1 ||
                                     submitText2.indexOf('register') > -1) {
-                                    console.log('[Luma Auto Register] Found button again, clicking...');
+                                    console.log('[Event Auto Register] Found button again, clicking...');
 
                                     var formElement4 = submitBtn2.closest('form');
                                     if (!formElement4) {
@@ -6260,13 +8372,13 @@ class RegistrationManager {
                                 }
                               }, 500); // Wait 500ms for modal to close
                             })) {
-                              console.log('[Luma Auto Register] Terms modal was found and is being handled, will click after...');
+                              console.log('[Event Auto Register] Terms modal was found and is being handled, will click after...');
                               return; // Terms modal was found and handled, callback will handle the click
                             }
                           }
 
                           // Button is enabled and terms modal already handled (or not needed), click immediately!
-                          console.log('[Luma Auto Register] Proceeding to click submit button immediately (termsModalAlreadyHandled: ' + termsModalAlreadyHandled + ')...');
+                          console.log('[Event Auto Register] Proceeding to click submit button immediately (termsModalAlreadyHandled: ' + termsModalAlreadyHandled + ')...');
 
                           // IMPORTANT: Check terms checkbox one final time right before submitting
                           // Stop all monitoring first to prevent infinite loops
@@ -6274,17 +8386,17 @@ class RegistrationManager {
                             if (window.__lumaCheckboxInterval) {
                               clearInterval(window.__lumaCheckboxInterval);
                               window.__lumaCheckboxInterval = null;
-                              console.log('[Luma Auto Register] Stopped periodic checkbox check');
+                              console.log('[Event Auto Register] Stopped periodic checkbox check');
                             }
                             if (window.__lumaCheckboxObserver) {
                               window.__lumaCheckboxObserver.disconnect();
                               window.__lumaCheckboxObserver = null;
-                              console.log('[Luma Auto Register] Stopped checkbox observer');
+                              console.log('[Event Auto Register] Stopped checkbox observer');
                             }
                             if (window.__lumaCheckboxDebugObserver) {
                               window.__lumaCheckboxDebugObserver.disconnect();
                               window.__lumaCheckboxDebugObserver = null;
-                              console.log('[Luma Auto Register] Stopped checkbox debug observer');
+                              console.log('[Event Auto Register] Stopped checkbox debug observer');
                             }
                           }
 
@@ -6306,13 +8418,13 @@ class RegistrationManager {
 
                             // Check if we should verify it (required OR autoAcceptTerms enabled)
                             if (isRequired || settings.autoAcceptTerms) {
-                              console.log('[Luma Auto Register] === FINAL CHECKBOX VERIFICATION (before submit) ===');
+                              console.log('[Event Auto Register] === FINAL CHECKBOX VERIFICATION (before submit) ===');
                               if (isRequired) {
-                                console.log('[Luma Auto Register] Terms checkbox is required (has asterisk), ensuring it\'s checked');
+                                console.log('[Event Auto Register] Terms checkbox is required (has asterisk), ensuring it\'s checked');
                               } else {
-                                console.log('[Luma Auto Register] Auto-accept terms is enabled, ensuring it\'s checked');
+                                console.log('[Event Auto Register] Auto-accept terms is enabled, ensuring it\'s checked');
                               }
-                              console.log('[Luma Auto Register] Current checkbox state: ' + termsCheckbox.checked);
+                              console.log('[Event Auto Register] Current checkbox state: ' + termsCheckbox.checked);
 
                               // Method 1: Set the checked property
                               termsCheckbox.checked = true;
@@ -6324,7 +8436,7 @@ class RegistrationManager {
                                 (termsCheckbox.__reactFiber$ || termsCheckbox.__reactFiber);
 
                               if (reactInstance) {
-                                console.log('[Luma Auto Register] Found React instance, attempting to update React state');
+                                console.log('[Event Auto Register] Found React instance, attempting to update React state');
                                 try {
                                   // Try to find the state updater
                                   var fiber = reactInstance;
@@ -6347,7 +8459,7 @@ class RegistrationManager {
                                     }
                                   }
                                 } catch (e) {
-                                  console.log('[Luma Auto Register] Could not update React state directly: ' + e.message);
+                                  console.log('[Event Auto Register] Could not update React state directly: ' + e.message);
                                 }
                               }
 
@@ -6368,7 +8480,7 @@ class RegistrationManager {
                                 // Label wraps the checkbox, clicking label should toggle it
                                 // But we want it checked, so only click if it's not already checked
                                 if (!termsCheckbox.checked) {
-                                  console.log('[Luma Auto Register] Clicking label to check checkbox');
+                                  console.log('[Event Auto Register] Clicking label to check checkbox');
                                   label.click();
                                 }
                               }
@@ -6376,46 +8488,46 @@ class RegistrationManager {
                               // Wait and verify it's still checked, then submit
                               setTimeout(function () {
                                 var finalState = termsCheckbox.checked;
-                                console.log('[Luma Auto Register] Final checkbox state before submit: ' + finalState);
+                                console.log('[Event Auto Register] Final checkbox state before submit: ' + finalState);
 
                                 if (!finalState) {
-                                  console.log('[Luma Auto Register] ⚠️⚠️⚠️ CRITICAL: Checkbox is UNCHECKED before submit! Attempting last-ditch effort...');
+                                  console.log('[Event Auto Register] ⚠️⚠️⚠️ CRITICAL: Checkbox is UNCHECKED before submit! Attempting last-ditch effort...');
                                   // Last resort: try clicking the checkbox directly (risky, might toggle)
                                   // But we know it's unchecked, so clicking should check it
                                   termsCheckbox.click();
                                   setTimeout(function () {
                                     if (termsCheckbox.checked) {
-                                      console.log('[Luma Auto Register] ✓ Checkbox checked via click, proceeding with submit');
+                                      console.log('[Event Auto Register] ✓ Checkbox checked via click, proceeding with submit');
                                     } else {
-                                      console.log('[Luma Auto Register] ✗✗✗ Checkbox still unchecked after click - form may fail validation');
+                                      console.log('[Event Auto Register] ✗✗✗ Checkbox still unchecked after click - form may fail validation');
                                     }
 
                                     // Submit regardless - let the form validation handle it
-                                    console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON ===');
-                                    console.log('[Luma Auto Register] Button text: "' + submitBtn.textContent + '"');
-                                    console.log('[Luma Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
-                                    console.log('[Luma Auto Register] Button type: ' + (submitBtn.type || 'none'));
+                                    console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON ===');
+                                    console.log('[Event Auto Register] Button text: "' + submitBtn.textContent + '"');
+                                    console.log('[Event Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
+                                    console.log('[Event Auto Register] Button type: ' + (submitBtn.type || 'none'));
 
                                     submitBtn.click();
                                     submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                     submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                                    console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                                    console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
                                   }, 200);
                                 } else {
-                                  console.log('[Luma Auto Register] ✓ Terms checkbox verified as checked, submitting...');
+                                  console.log('[Event Auto Register] ✓ Terms checkbox verified as checked, submitting...');
                                 }
                               }, 500);
                             } else {
-                              console.log('[Luma Auto Register] Terms checkbox found but not required and autoAcceptTerms is disabled - skipping final check');
+                              console.log('[Event Auto Register] Terms checkbox found but not required and autoAcceptTerms is disabled - skipping final check');
                             }
                           }
 
                           // Submit button click (runs regardless of checkbox state)
-                          console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON ===');
-                          console.log('[Luma Auto Register] Button text: "' + submitBtn.textContent + '"');
-                          console.log('[Luma Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
-                          console.log('[Luma Auto Register] Button type: ' + (submitBtn.type || 'none'));
+                          console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON ===');
+                          console.log('[Event Auto Register] Button text: "' + submitBtn.textContent + '"');
+                          console.log('[Event Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
+                          console.log('[Event Auto Register] Button type: ' + (submitBtn.type || 'none'));
 
                           // CRITICAL: Verify fields are still filled right before submitting
                           var allInputsBeforeSubmit = document.querySelectorAll('input[type="text"], input:not([type]), input[type="email"], textarea');
@@ -6451,7 +8563,7 @@ class RegistrationManager {
                               labelTextBefore.indexOf('phone') > -1;
 
                             if (isRequiredBefore && isFieldWeFilledBefore && !fieldValueBefore) {
-                              console.log('[Luma Auto Register] ⚠️ Field cleared before submit: ' + (labelTextBefore || fieldNameBefore || fieldPlaceholderBefore) + ' - re-filling...');
+                              console.log('[Event Auto Register] ⚠️ Field cleared before submit: ' + (labelTextBefore || fieldNameBefore || fieldPlaceholderBefore) + ' - re-filling...');
                               needsRefill = true;
 
                               if (fieldNameBefore.indexOf('email') > -1 || fieldPlaceholderBefore.indexOf('email') > -1 || labelTextBefore.indexOf('email') > -1) {
@@ -6509,7 +8621,7 @@ class RegistrationManager {
                           }
 
                           if (needsRefill) {
-                            console.log('[Luma Auto Register] Fields were cleared, waiting 500ms after re-filling before submitting...');
+                            console.log('[Event Auto Register] Fields were cleared, waiting 500ms after re-filling before submitting...');
                             setTimeout(function () {
                               // Mark form as submitted to prevent re-scanning from interfering
                               if (typeof window !== 'undefined') {
@@ -6521,7 +8633,7 @@ class RegistrationManager {
                               submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                               submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                              console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                              console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
                             }, 500);
                             return;
                           }
@@ -6536,38 +8648,55 @@ class RegistrationManager {
                           submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                           submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                          console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                          console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
 
                           // IMMEDIATELY check for post-submit terms modal (appears right after clicking submit)
                           // Check with short delay to let modal render
                           setTimeout(function () {
-                            console.log('[Luma Auto Register] === QUICK CHECK FOR POST-SUBMIT TERMS MODAL (500ms after submit) ===');
+                            console.log('[Event Auto Register] === QUICK CHECK FOR POST-SUBMIT TERMS MODAL (500ms after submit) ===');
                             
                             // Look for terms modal that appears after submit
+                            // CRITICAL: Must find a "Sign & Accept" BUTTON to confirm it's a real terms modal
                             var quickTermsModal = null;
-                            var quickElements = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="overlay"], [class*="popup"], [class*="card"]');
+                            var signAcceptButtonFound = false;
                             
-                            for (var qti = 0; qti < quickElements.length; qti++) {
-                              var qel = quickElements[qti];
-                              var qelText = (qel.textContent || '').toLowerCase();
-                              var qelVisible = qel.offsetParent !== null || (window.getComputedStyle(qel).display !== 'none');
-                              
-                              // Look for "Accept Terms" or signature indicators
-                              var qHasAcceptTerms = qelText.indexOf('accept terms') > -1 ||
-                                qelText.indexOf('sign & accept') > -1 ||
-                                qelText.indexOf('sign and accept') > -1 ||
-                                (qelText.indexOf('type') > -1 && qelText.indexOf('name') > -1 && qelText.indexOf('confirm') > -1) ||
-                                (qelText.indexOf('type') > -1 && qelText.indexOf('name') > -1 && qelText.indexOf('agree') > -1);
-                              
-                              if (qHasAcceptTerms && qelVisible) {
-                                quickTermsModal = qel;
-                                console.log('[Luma Auto Register] ✓ Found post-submit terms modal (quick check)!');
+                            // First, check if there's actually a "Sign & Accept" button on the page
+                            var allBtns = document.querySelectorAll('button');
+                            for (var sab = 0; sab < allBtns.length; sab++) {
+                              var sabText = (allBtns[sab].textContent || '').toLowerCase().trim();
+                              if ((sabText.indexOf('sign') > -1 && sabText.indexOf('accept') > -1) || sabText === 'sign & accept' || sabText === 'sign and accept') {
+                                signAcceptButtonFound = true;
+                                console.log('[Event Auto Register] ✓ Found "Sign & Accept" button: "' + allBtns[sab].textContent.trim() + '"');
                                 break;
                               }
                             }
                             
+                            // Only look for terms modal if we found the Sign & Accept button
+                            if (signAcceptButtonFound) {
+                              var quickElements = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="overlay"], [class*="popup"], [class*="card"]');
+                              
+                              for (var qti = 0; qti < quickElements.length; qti++) {
+                                var qel = quickElements[qti];
+                                var qelText = (qel.textContent || '').toLowerCase();
+                                var qelVisible = qel.offsetParent !== null || (window.getComputedStyle(qel).display !== 'none');
+                                
+                                // Look for "Accept Terms" or signature indicators - must also have sign & accept in the element
+                                var qHasAcceptTerms = (qelText.indexOf('accept terms') > -1 && qelText.indexOf('sign') > -1) ||
+                                  qelText.indexOf('sign & accept') > -1 ||
+                                  qelText.indexOf('sign and accept') > -1;
+                                
+                                if (qHasAcceptTerms && qelVisible) {
+                                  quickTermsModal = qel;
+                                  console.log('[Event Auto Register] ✓ Found post-submit terms modal (quick check)!');
+                                  break;
+                                }
+                              }
+                            } else {
+                              console.log('[Event Auto Register] No "Sign & Accept" button found - skipping terms modal check');
+                            }
+                            
                             if (quickTermsModal) {
-                              console.log('[Luma Auto Register] === HANDLING POST-SUBMIT TERMS MODAL (quick) ===');
+                              console.log('[Event Auto Register] === HANDLING POST-SUBMIT TERMS MODAL (quick) ===');
                               
                               // Use a retry loop to wait for the signature input to appear
                               // The Accept Terms modal may load the signature input asynchronously
@@ -6575,12 +8704,6 @@ class RegistrationManager {
                                 retryCount = retryCount || 0;
                                 var maxRetries = 10; // Up to 5 seconds total (10 x 500ms)
                                 
-                                // #region agent log H6-H8
-                                var qTermsModalEl = document.querySelector('[class*="modal"]') || document.querySelector('[role="dialog"]');
-                                var qAllInputsEverywhere = document.querySelectorAll('input');
-                                fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6485-modal',message:'Terms modal contents (retry '+retryCount+')',data:{retryCount:retryCount,allInputsCount:qAllInputsEverywhere.length,allInputs:Array.from(qAllInputsEverywhere).map(function(i,x){return{idx:x,type:i.type,placeholder:i.placeholder,value:i.value,visible:i.offsetParent!==null};})},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H6-H8'})}).catch(function(){});
-                                // #endregion
-                              
                               // Find the signature input field - look for signature-specific placeholders
                               // The signature input typically has placeholder like "John Smith" or "Jane Doe"
                               // NOT "Your Name" which is the main form's name field
@@ -6591,25 +8714,12 @@ class RegistrationManager {
                               var johnSmithTextarea = document.querySelector('textarea[placeholder*="John Smith"], textarea[placeholder*="john smith"], textarea[placeholder*="Jane Doe"], textarea[placeholder*="jane doe"]');
                               if (johnSmithTextarea && johnSmithTextarea.offsetParent !== null && !johnSmithTextarea.value.trim()) {
                                 qSignatureInput = johnSmithTextarea;
-                                console.log('[Luma Auto Register] ✓ FOUND signature TEXTAREA with placeholder: "' + johnSmithTextarea.placeholder + '"');
+                                console.log('[Event Auto Register] ✓ FOUND signature TEXTAREA with placeholder: "' + johnSmithTextarea.placeholder + '"');
                               }
                               
                               var qInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
                               
-                              console.log('[Luma Auto Register] Found ' + qInputs.length + ' text inputs/textareas in document');
-                              
-                              // #region agent log H1-H5
-                              // Also search for inputs with "john" or "smith" in placeholder anywhere in DOM
-                              var qJohnSmithInputs = [];
-                              var qEveryInput = document.querySelectorAll('input');
-                              for (var qji = 0; qji < qEveryInput.length; qji++) {
-                                var qjPh = (qEveryInput[qji].placeholder || '').toLowerCase();
-                                if (qjPh.indexOf('john') > -1 || qjPh.indexOf('smith') > -1 || qjPh.indexOf('signature') > -1) {
-                                  qJohnSmithInputs.push({idx:qji,type:qEveryInput[qji].type,placeholder:qEveryInput[qji].placeholder,visible:qEveryInput[qji].offsetParent!==null,className:qEveryInput[qji].className});
-                                }
-                              }
-                              fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6490',message:'All inputs in document',data:{count:qInputs.length,johnSmithInputsFound:qJohnSmithInputs.length,johnSmithInputs:qJohnSmithInputs,inputs:Array.from(qInputs).map(function(inp,idx){return{idx:idx,type:inp.type,placeholder:inp.placeholder,value:inp.value,visible:inp.offsetParent!==null,name:inp.name,id:inp.id,className:inp.className.substring(0,50)};})},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1-H5'})}).catch(function(){});
-                              // #endregion
+                              console.log('[Event Auto Register] Found ' + qInputs.length + ' text inputs/textareas in document');
                               
                               // NEW APPROACH: Find the Accept Terms modal container first, then find inputs INSIDE it
                               // IMPORTANT: Signature field can be a TEXTAREA with placeholder "John Smith"
@@ -6626,36 +8736,28 @@ class RegistrationManager {
                                   // Accept if we find textareas (likely signature field) or small number of inputs
                                   if (textareasInside.length > 0 || (inputsInside.length > 0 && inputsInside.length <= 5)) {
                                     termsModalContainer = allDivs[tmd];
-                                    console.log('[Luma Auto Register] ✓ Found Accept Terms modal container with ' + textareasInside.length + ' textareas and ' + inputsInside.length + ' inputs');
+                                    console.log('[Event Auto Register] ✓ Found Accept Terms modal container with ' + textareasInside.length + ' textareas and ' + inputsInside.length + ' inputs');
                                     break;
                                   }
                                 }
                               }
                               
-                              // #region agent log H12 - Terms Modal Container Search
-                              fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6516-termsModal',message:'Terms modal container search',data:{found:!!termsModalContainer,inputsInModalCount:termsModalContainer?termsModalContainer.querySelectorAll('input[type="text"], input:not([type])').length:0},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H12'})}).catch(function(){});
-                              // #endregion
-                              
                               // If we found the terms modal container, look for ANY visible empty input/textarea inside it
                               if (termsModalContainer) {
                                 var modalInputs = termsModalContainer.querySelectorAll('input[type="text"], input:not([type]), textarea');
-                                console.log('[Luma Auto Register] Searching ' + modalInputs.length + ' inputs/textareas INSIDE terms modal container');
+                                console.log('[Event Auto Register] Searching ' + modalInputs.length + ' inputs/textareas INSIDE terms modal container');
                                 
                                 for (var mi = 0; mi < modalInputs.length; mi++) {
                                   var minp = modalInputs[mi];
                                   var mVisible = minp.offsetParent !== null;
                                   var mValue = (minp.value || '').trim();
                                   
-                                  console.log('[Luma Auto Register]   Modal input ' + mi + ': placeholder="' + minp.placeholder + '", visible=' + mVisible + ', value="' + mValue + '"');
-                                  
-                                  // #region agent log H13 - Modal Input Check
-                                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6540-modalInput',message:'Checking modal input',data:{idx:mi,placeholder:minp.placeholder,visible:mVisible,value:mValue,isEmpty:mValue.length===0,willUse:(mVisible&&mValue.length===0)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H13'})}).catch(function(){});
-                                  // #endregion
+                                  console.log('[Event Auto Register]   Modal input ' + mi + ': placeholder="' + minp.placeholder + '", visible=' + mVisible + ', value="' + mValue + '"');
                                   
                                   // Use ANY visible empty input in the terms modal - this IS the signature field
                                   if (mVisible && mValue.length === 0) {
                                     qSignatureInput = minp;
-                                    console.log('[Luma Auto Register] ✓ Found signature input in terms modal: placeholder="' + minp.placeholder + '"');
+                                    console.log('[Event Auto Register] ✓ Found signature input in terms modal: placeholder="' + minp.placeholder + '"');
                                     break;
                                   }
                                 }
@@ -6663,19 +8765,12 @@ class RegistrationManager {
                               
                               // Fallback: Original approach for inputs NOT in a clearly identified modal
                               if (!qSignatureInput) {
-                                console.log('[Luma Auto Register] Terms modal container not found, using fallback search...');
+                                console.log('[Event Auto Register] Terms modal container not found, using fallback search...');
                                 for (var qsi = 0; qsi < qInputs.length; qsi++) {
                                   var qinp = qInputs[qsi];
                                   var qplaceholder = (qinp.placeholder || '').toLowerCase();
                                   var qVisible = qinp.offsetParent !== null;
                                   var qValue = (qinp.value || '').trim();
-                                  
-                                  // #region agent log H2-H5
-                                  var qParentText = '';
-                                  var qTempParent = qinp.parentElement;
-                                  for (var qpi = 0; qpi < 3 && qTempParent; qpi++) { qParentText += (qTempParent.textContent || '').substring(0,100); qTempParent = qTempParent.parentElement; }
-                                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6495',message:'Checking input (fallback)',data:{idx:qsi,placeholder:qinp.placeholder,visible:qVisible,value:qValue,willSkip:(!qVisible||qValue.length>0),parentTextSample:qParentText.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2-H5'})}).catch(function(){});
-                                  // #endregion
                                   
                                   // Skip if already has a value or not visible
                                   if (!qVisible || qValue.length > 0) continue;
@@ -6705,77 +8800,16 @@ class RegistrationManager {
                                     parentText.indexOf('sign & accept') > -1 ||
                                     parentText.indexOf('sign and accept') > -1;
                                   
-                                  console.log('[Luma Auto Register]   Input ' + qsi + ': placeholder="' + qinp.placeholder + '", visible=' + qVisible + ', isSignature=' + isSignaturePlaceholder + ', inTermsModal=' + isInTermsModal);
-                                  
-                                  // #region agent log H2-H3
-                                  fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6530',message:'Signature detection result (fallback)',data:{idx:qsi,placeholder:qinp.placeholder,isSignaturePlaceholder:isSignaturePlaceholder,isInTermsModal:isInTermsModal,willMatch:(isSignaturePlaceholder||isInTermsModal)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2-H3'})}).catch(function(){});
-                                  // #endregion
+                                  console.log('[Event Auto Register]   Input ' + qsi + ': placeholder="' + qinp.placeholder + '", visible=' + qVisible + ', isSignature=' + isSignaturePlaceholder + ', inTermsModal=' + isInTermsModal);
                                   
                                   // KEY FIX: If input is inside terms modal, use it even if placeholder is "Your Name"
                                   if (isSignaturePlaceholder || isInTermsModal) {
                                     qSignatureInput = qinp;
-                                    console.log('[Luma Auto Register] ✓ Found signature input with placeholder: "' + qinp.placeholder + '"');
+                                    console.log('[Event Auto Register] ✓ Found signature input with placeholder: "' + qinp.placeholder + '"');
                                     break;
                                   }
                                 }
                               }
-                              
-                              // #region agent log H4 + H9-H11 (Shadow DOM, iframe, custom elements)
-                              var qAllInputs = document.querySelectorAll('input');
-                              var qTextareas = document.querySelectorAll('textarea');
-                              var qContentEditable = document.querySelectorAll('[contenteditable="true"]');
-                              
-                              // H9: Search shadow DOMs for inputs
-                              var shadowInputs = [];
-                              var allShadowHosts = document.querySelectorAll('*');
-                              for (var shi = 0; shi < allShadowHosts.length; shi++) {
-                                if (allShadowHosts[shi].shadowRoot) {
-                                  var shadowInps = allShadowHosts[shi].shadowRoot.querySelectorAll('input');
-                                  for (var sii = 0; sii < shadowInps.length; sii++) {
-                                    shadowInputs.push({host: allShadowHosts[shi].tagName, placeholder: shadowInps[sii].placeholder, type: shadowInps[sii].type});
-                                  }
-                                }
-                              }
-                              
-                              // H10: Search iframes for inputs  
-                              var iframeInputs = [];
-                              var allIframes = document.querySelectorAll('iframe');
-                              for (var ifi = 0; ifi < allIframes.length; ifi++) {
-                                try {
-                                  var iframeDoc = allIframes[ifi].contentDocument || allIframes[ifi].contentWindow.document;
-                                  if (iframeDoc) {
-                                    var ifrInps = iframeDoc.querySelectorAll('input');
-                                    for (var ifii = 0; ifii < ifrInps.length; ifii++) {
-                                      iframeInputs.push({src: allIframes[ifi].src.substring(0,50), placeholder: ifrInps[ifii].placeholder, type: ifrInps[ifii].type});
-                                    }
-                                  }
-                                } catch(e) { /* cross-origin */ }
-                              }
-                              
-                              // H11: Search for any element with "john smith" in its attributes or placeholder
-                              var johnSmithElements = [];
-                              var allElems = document.querySelectorAll('*');
-                              for (var jse = 0; jse < allElems.length; jse++) {
-                                var el = allElems[jse];
-                                var ph = (el.getAttribute('placeholder') || '').toLowerCase();
-                                var val = (el.getAttribute('value') || '').toLowerCase();
-                                if (ph.indexOf('john') > -1 || ph.indexOf('smith') > -1 || val.indexOf('john') > -1) {
-                                  johnSmithElements.push({tag: el.tagName, class: el.className.substring(0,30), placeholder: el.getAttribute('placeholder'), type: el.type || el.getAttribute('type')});
-                                }
-                              }
-                              
-                              // Find any element containing "Accept Terms" text
-                              var qAcceptTermsEl = null;
-                              var qAllDivs = document.querySelectorAll('div, section, aside');
-                              for (var qd = 0; qd < qAllDivs.length && !qAcceptTermsEl; qd++) {
-                                var qdText = (qAllDivs[qd].textContent || '').toLowerCase();
-                                if (qdText.indexOf('accept terms') > -1 && qdText.indexOf('sign & accept') > -1) {
-                                  qAcceptTermsEl = qAllDivs[qd];
-                                }
-                              }
-                              var qAcceptTermsInputs = qAcceptTermsEl ? qAcceptTermsEl.querySelectorAll('input') : [];
-                              fetch('http://127.0.0.1:7242/ingest/b8f00c5b-5a6e-4ae8-bb9d-e4bee7babe9f',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:6545',message:'All form elements + shadow/iframe/johnsmith',data:{allInputsCount:qAllInputs.length,textareasCount:qTextareas.length,contentEditableCount:qContentEditable.length,shadowInputsCount:shadowInputs.length,shadowInputs:shadowInputs,iframeInputsCount:iframeInputs.length,iframeInputs:iframeInputs,johnSmithElementsCount:johnSmithElements.length,johnSmithElements:johnSmithElements,acceptTermsElFound:!!qAcceptTermsEl,acceptTermsInputsCount:qAcceptTermsInputs.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H4-H11'})}).catch(function(){});
-                              // #endregion
                               
                               // Fallback 1: Look for empty input near "Sign & Accept" button
                               if (!qSignatureInput) {
@@ -6793,7 +8827,7 @@ class RegistrationManager {
                                         // Skip if it's the main form's name field or has value
                                         if (nInput.offsetParent !== null && !(nInput.value || '').trim() && nPlaceholder !== 'your name') {
                                           qSignatureInput = nInput;
-                                          console.log('[Luma Auto Register] ✓ Found signature input near Sign & Accept button: placeholder="' + nInput.placeholder + '"');
+                                          console.log('[Event Auto Register] ✓ Found signature input near Sign & Accept button: placeholder="' + nInput.placeholder + '"');
                                           break;
                                         }
                                       }
@@ -6804,19 +8838,45 @@ class RegistrationManager {
                                 }
                               }
                               
-                              // Fallback 2: Look for ANY visible empty text input that's NOT the main form fields
+                              // Fallback 2: Look for visible empty text input that has signature-like characteristics
+                              // STRICT: Only select if it looks like a signature field (has certain placeholder patterns)
+                              // Do NOT grab random form fields like Telegram, Twitter, etc.
                               if (!qSignatureInput) {
-                                var allTextInputs = document.querySelectorAll('input[type="text"], input:not([type])');
+                                var allTextInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
                                 for (var ati = 0; ati < allTextInputs.length; ati++) {
                                   var atInput = allTextInputs[ati];
                                   var atPlaceholder = (atInput.placeholder || '').toLowerCase();
                                   var atValue = (atInput.value || '').trim();
                                   var atVisible = atInput.offsetParent !== null;
-                                  // Skip main form fields and filled inputs
-                                  var isMainFormField = atPlaceholder === 'your name' || atPlaceholder === 'you@email.com' || atPlaceholder.indexOf('select') > -1;
-                                  if (atVisible && !atValue && !isMainFormField) {
+                                  
+                                  // Check if this input has signature-like placeholder
+                                  var hasSignaturePlaceholder = 
+                                    atPlaceholder.indexOf('john') > -1 ||
+                                    atPlaceholder.indexOf('smith') > -1 ||
+                                    atPlaceholder.indexOf('jane') > -1 ||
+                                    atPlaceholder.indexOf('doe') > -1 ||
+                                    atPlaceholder.indexOf('signature') > -1 ||
+                                    atPlaceholder.indexOf('sign here') > -1 ||
+                                    atPlaceholder.indexOf('type your name') > -1 ||
+                                    atPlaceholder.indexOf('full name') > -1;
+                                  
+                                  // Check if this input is near a "Sign & Accept" button (within 5 parent levels)
+                                  var isNearSignAcceptBtn = false;
+                                  var parentCheck = atInput.parentElement;
+                                  for (var pci = 0; pci < 5 && parentCheck; pci++) {
+                                    var parentText = (parentCheck.textContent || '').toLowerCase();
+                                    if ((parentText.indexOf('sign') > -1 && parentText.indexOf('accept') > -1) ||
+                                        parentText.indexOf('accept terms') > -1) {
+                                      isNearSignAcceptBtn = true;
+                                      break;
+                                    }
+                                    parentCheck = parentCheck.parentElement;
+                                  }
+                                  
+                                  // ONLY select if it has signature-like placeholder OR is near Sign & Accept
+                                  if (atVisible && !atValue && (hasSignaturePlaceholder || isNearSignAcceptBtn)) {
                                     qSignatureInput = atInput;
-                                    console.log('[Luma Auto Register] ✓ Found signature input via fallback scan: placeholder="' + atInput.placeholder + '"');
+                                    console.log('[Event Auto Register] ✓ Found signature input via fallback scan: placeholder="' + atInput.placeholder + '", nearSignAccept=' + isNearSignAcceptBtn);
                                     break;
                                   }
                                 }
@@ -6827,7 +8887,7 @@ class RegistrationManager {
                                 var qFullName = ((settings.firstName || '') + ' ' + (settings.lastName || '')).trim();
                                 if (!qFullName) qFullName = settings.name || 'Attendee';
                                 
-                                console.log('[Luma Auto Register] Filling signature with: "' + qFullName + '"');
+                                console.log('[Event Auto Register] Filling signature with: "' + qFullName + '"');
                                 
                                 // APPROACH: Simulate actual typing to properly update React's internal state
                                 // Focus the textarea first
@@ -6846,9 +8906,9 @@ class RegistrationManager {
                                     qNativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                                   }
                                   qNativeSetter.call(qSignatureInput, qFullName);
-                                  console.log('[Luma Auto Register] ✓ Set signature value via native ' + qSignatureInput.tagName + ' setter');
+                                  console.log('[Event Auto Register] ✓ Set signature value via native ' + qSignatureInput.tagName + ' setter');
                                 } catch (e) {
-                                  console.log('[Luma Auto Register] Native setter failed, using direct assignment: ' + e.message);
+                                  console.log('[Event Auto Register] Native setter failed, using direct assignment: ' + e.message);
                                   qSignatureInput.value = qFullName;
                                 }
                                 
@@ -6873,7 +8933,7 @@ class RegistrationManager {
                                 
                                 // Method 2: Simulate typing character by character (for React 16+)
                                 // This creates keyboard events that React's synthetic event system can capture
-                                console.log('[Luma Auto Register] Simulating keyboard input for React...');
+                                console.log('[Event Auto Register] Simulating keyboard input for React...');
                                 for (var ci = 0; ci < qFullName.length; ci++) {
                                   var char = qFullName[ci];
                                   try {
@@ -6889,16 +8949,16 @@ class RegistrationManager {
                                 // Blur to finalize
                                 qSignatureInput.dispatchEvent(new Event('blur', { bubbles: true }));
                                 
-                                console.log('[Luma Auto Register] Signature value after fill: "' + qSignatureInput.value + '"');
+                                console.log('[Event Auto Register] Signature value after fill: "' + qSignatureInput.value + '"');
                                 
                                 // Find and click "Sign & Accept" button - add delay to let React process the change
                                 setTimeout(function () {
                                   // Verify the value is still there
-                                  console.log('[Luma Auto Register] Signature value before clicking Sign & Accept: "' + qSignatureInput.value + '"');
+                                  console.log('[Event Auto Register] Signature value before clicking Sign & Accept: "' + qSignatureInput.value + '"');
                                   
                                   // If value was cleared by React, re-fill it
                                   if (!qSignatureInput.value.trim()) {
-                                    console.log('[Luma Auto Register] ⚠️ Signature was cleared by React! Re-filling...');
+                                    console.log('[Event Auto Register] ⚠️ Signature was cleared by React! Re-filling...');
                                     try {
                                       var qNativeSetter2;
                                       if (qSignatureInput.tagName === 'TEXTAREA') {
@@ -6917,12 +8977,12 @@ class RegistrationManager {
                                   var qSignButton = null;
                                   var qButtons = quickTermsModal.querySelectorAll('button');
                                   
-                                  console.log('[Luma Auto Register] Looking for Sign & Accept button among ' + qButtons.length + ' buttons');
+                                  console.log('[Event Auto Register] Looking for Sign & Accept button among ' + qButtons.length + ' buttons');
                                   
                                   for (var qbi = 0; qbi < qButtons.length; qbi++) {
                                     var qbtn = qButtons[qbi];
                                     var qbtnText = (qbtn.textContent || '').toLowerCase();
-                                    console.log('[Luma Auto Register]   Button ' + qbi + ': "' + qbtnText + '"');
+                                    console.log('[Event Auto Register]   Button ' + qbi + ': "' + qbtnText + '"');
                                     
                                     if (qbtnText.indexOf('sign') > -1 && qbtnText.indexOf('accept') > -1) {
                                       qSignButton = qbtn;
@@ -6932,17 +8992,17 @@ class RegistrationManager {
                                   
                                   if (qSignButton) {
                                     // One more re-fill just before clicking
-                                    console.log('[Luma Auto Register] Final signature value: "' + qSignatureInput.value + '"');
+                                    console.log('[Event Auto Register] Final signature value: "' + qSignatureInput.value + '"');
                                     if (!qSignatureInput.value.trim()) {
                                       qSignatureInput.value = qFullName;
                                       qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
                                     }
                                     
                                     // Check if button is disabled
-                                    console.log('[Luma Auto Register] Sign & Accept button disabled: ' + qSignButton.disabled);
-                                    console.log('[Luma Auto Register] Sign & Accept button className: ' + qSignButton.className);
+                                    console.log('[Event Auto Register] Sign & Accept button disabled: ' + qSignButton.disabled);
+                                    console.log('[Event Auto Register] Sign & Accept button className: ' + qSignButton.className);
                                     
-                                    console.log('[Luma Auto Register] Clicking "Sign & Accept" button (multiple methods)...');
+                                    console.log('[Event Auto Register] Clicking "Sign & Accept" button (multiple methods)...');
                                     
                                     // Method 1: Direct click
                                     qSignButton.click();
@@ -6971,11 +9031,11 @@ class RegistrationManager {
                                       qSignButton.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
                                     } catch (e) {}
                                     
-                                    console.log('[Luma Auto Register] ✓ Sign & Accept button clicked (4 methods)!');
+                                    console.log('[Event Auto Register] ✓ Sign & Accept button clicked (4 methods)!');
                                     
                                     // After clicking Sign & Accept, wait for modal to close then click submit to finalize
                                     setTimeout(function() {
-                                      console.log('[Luma Auto Register] Checking if terms modal is still open...');
+                                      console.log('[Event Auto Register] Checking if terms modal is still open...');
                                       var termsModalStillOpen = false;
                                       var signBtnStillVisible = qSignButton && qSignButton.offsetParent !== null;
                                       
@@ -6992,7 +9052,7 @@ class RegistrationManager {
                                       }
                                       
                                       if (termsModalStillOpen || signBtnStillVisible) {
-                                        console.log('[Luma Auto Register] ⚠️ Terms modal still open (signBtnVisible=' + signBtnStillVisible + ') - clicking Sign & Accept again...');
+                                        console.log('[Event Auto Register] ⚠️ Terms modal still open (signBtnVisible=' + signBtnStillVisible + ') - clicking Sign & Accept again...');
                                         if (qSignButton && qSignButton.offsetParent !== null) {
                                           // Re-fill signature in case it was cleared
                                           if (qSignatureInput && !qSignatureInput.value.trim()) {
@@ -7006,14 +9066,14 @@ class RegistrationManager {
                                               qNativeSetter3.call(qSignatureInput, qFullName);
                                               qSignatureInput.dispatchEvent(new Event('input', { bubbles: true }));
                                               qSignatureInput.dispatchEvent(new Event('change', { bubbles: true }));
-                                              console.log('[Luma Auto Register] Re-filled signature: "' + qSignatureInput.value + '"');
+                                              console.log('[Event Auto Register] Re-filled signature: "' + qSignatureInput.value + '"');
                                             } catch(e) {}
                                           }
                                           qSignButton.click();
-                                          console.log('[Luma Auto Register] ✓ Sign & Accept clicked again');
+                                          console.log('[Event Auto Register] ✓ Sign & Accept clicked again');
                                         }
                                       } else {
-                                        console.log('[Luma Auto Register] ✓ Terms modal closed! Clicking submit to finalize registration...');
+                                        console.log('[Event Auto Register] ✓ Terms modal closed! Clicking submit to finalize registration...');
                                         
                                         // Find and click the main submit button to finalize registration
                                         // IMPORTANT: Prioritize type=submit buttons over type=button
@@ -7056,23 +9116,23 @@ class RegistrationManager {
                                             finalSubmitBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
                                             finalSubmitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
                                           } catch(e) {}
-                                          console.log('[Luma Auto Register] ✓ Final submit button clicked!');
+                                          console.log('[Event Auto Register] ✓ Final submit button clicked!');
                                         } else {
-                                          console.log('[Luma Auto Register] ⚠️ No submit button found after terms modal');
+                                          console.log('[Event Auto Register] ⚠️ No submit button found after terms modal');
                                         }
                                       }
                                     }, 1500);
                                   } else {
-                                    console.log('[Luma Auto Register] ⚠️ Could not find "Sign & Accept" button');
+                                    console.log('[Event Auto Register] ⚠️ Could not find "Sign & Accept" button');
                                   }
                                 }, 500);
                               } else {
                                 // No signature input found - retry if we haven't exceeded max retries
                                 if (retryCount < maxRetries) {
-                                  console.log('[Luma Auto Register] ⚠️ Signature input not found yet, retrying in 500ms... (attempt ' + (retryCount + 1) + '/' + maxRetries + ')');
+                                  console.log('[Event Auto Register] ⚠️ Signature input not found yet, retrying in 500ms... (attempt ' + (retryCount + 1) + '/' + maxRetries + ')');
                                   setTimeout(function() { findAndFillSignature(retryCount + 1); }, 500);
                                 } else {
-                                  console.log('[Luma Auto Register] ⚠️ Could not find signature input in terms modal after ' + maxRetries + ' retries');
+                                  console.log('[Event Auto Register] ⚠️ Could not find signature input in terms modal after ' + maxRetries + ' retries');
                                 }
                               }
                               }; // End of findAndFillSignature function
@@ -7080,7 +9140,7 @@ class RegistrationManager {
                               // Start the first attempt
                               findAndFillSignature(0);
                             } else {
-                              console.log('[Luma Auto Register] No post-submit terms modal found in quick check');
+                              console.log('[Event Auto Register] No post-submit terms modal found in quick check');
                             }
                           }, 500); // Quick check 500ms after submit
 
@@ -7090,33 +9150,47 @@ class RegistrationManager {
                             // FIRST: Check for post-submit terms modal (requires name signature)
                             // This modal appears AFTER clicking submit on some events
                             var handlePostSubmitTermsModal = function (callback) {
-                              console.log('[Luma Auto Register] === CHECKING FOR POST-SUBMIT TERMS MODAL ===');
+                              console.log('[Event Auto Register] === CHECKING FOR POST-SUBMIT TERMS MODAL ===');
                               
-                              // Look for terms modal that appears after submit
-                              var termsModalPostSubmit = null;
-                              var allElements = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="overlay"], [class*="popup"]');
-                              
-                              for (var tmi = 0; tmi < allElements.length; tmi++) {
-                                var el = allElements[tmi];
-                                var elText = (el.textContent || '').toLowerCase();
-                                var isVisible = el.offsetParent !== null || (window.getComputedStyle(el).display !== 'none');
-                                
-                                // Look for "Accept Terms" or "Sign & Accept" indicators
-                                var hasAcceptTerms = elText.indexOf('accept terms') > -1 ||
-                                  elText.indexOf('sign & accept') > -1 ||
-                                  elText.indexOf('sign and accept') > -1 ||
-                                  (elText.indexOf('type') > -1 && elText.indexOf('name') > -1 && elText.indexOf('confirm') > -1) ||
-                                  (elText.indexOf('type') > -1 && elText.indexOf('name') > -1 && elText.indexOf('agree') > -1);
-                                
-                                if (hasAcceptTerms && isVisible) {
-                                  termsModalPostSubmit = el;
-                                  console.log('[Luma Auto Register] ✓ Found post-submit terms modal!');
+                              // CRITICAL: First check if there's a "Sign & Accept" button - required indicator
+                              var hasSignAcceptButton = false;
+                              var allBtnsCheck = document.querySelectorAll('button');
+                              for (var sabCheck = 0; sabCheck < allBtnsCheck.length; sabCheck++) {
+                                var sabTextCheck = (allBtnsCheck[sabCheck].textContent || '').toLowerCase().trim();
+                                if ((sabTextCheck.indexOf('sign') > -1 && sabTextCheck.indexOf('accept') > -1) || sabTextCheck === 'sign & accept' || sabTextCheck === 'sign and accept') {
+                                  hasSignAcceptButton = true;
+                                  console.log('[Event Auto Register] ✓ Found "Sign & Accept" button for terms modal');
                                   break;
                                 }
                               }
                               
+                              // Only look for terms modal if Sign & Accept button exists
+                              var termsModalPostSubmit = null;
+                              if (hasSignAcceptButton) {
+                                var allElements = document.querySelectorAll('[role="dialog"], .modal, [class*="modal"], [class*="Modal"], [class*="dialog"], [class*="Dialog"], [class*="overlay"], [class*="popup"]');
+                                
+                                for (var tmi = 0; tmi < allElements.length; tmi++) {
+                                  var el = allElements[tmi];
+                                  var elText = (el.textContent || '').toLowerCase();
+                                  var isVisible = el.offsetParent !== null || (window.getComputedStyle(el).display !== 'none');
+                                  
+                                  // Look for "Accept Terms" combined with "sign"
+                                  var hasAcceptTerms = (elText.indexOf('accept terms') > -1 && elText.indexOf('sign') > -1) ||
+                                    elText.indexOf('sign & accept') > -1 ||
+                                    elText.indexOf('sign and accept') > -1;
+                                  
+                                  if (hasAcceptTerms && isVisible) {
+                                    termsModalPostSubmit = el;
+                                    console.log('[Event Auto Register] ✓ Found post-submit terms modal!');
+                                    break;
+                                  }
+                                }
+                              } else {
+                                console.log('[Event Auto Register] No "Sign & Accept" button found - no terms modal');
+                              }
+                              
                               if (termsModalPostSubmit) {
-                                console.log('[Luma Auto Register] === HANDLING POST-SUBMIT TERMS MODAL ===');
+                                console.log('[Event Auto Register] === HANDLING POST-SUBMIT TERMS MODAL ===');
                                 
                                 // Find the signature input field
                                 var signatureInput = null;
@@ -7137,7 +9211,7 @@ class RegistrationManager {
                                     !inp.type
                                   )) {
                                     signatureInput = inp;
-                                    console.log('[Luma Auto Register] ✓ Found signature input with placeholder: "' + inp.placeholder + '"');
+                                    console.log('[Event Auto Register] ✓ Found signature input with placeholder: "' + inp.placeholder + '"');
                                     break;
                                   }
                                 }
@@ -7147,7 +9221,7 @@ class RegistrationManager {
                                   var fullName = ((settings.firstName || '') + ' ' + (settings.lastName || '')).trim();
                                   if (!fullName) fullName = settings.name || 'Attendee';
                                   
-                                  console.log('[Luma Auto Register] Filling signature with: "' + fullName + '"');
+                                  console.log('[Event Auto Register] Filling signature with: "' + fullName + '"');
                                   
                                   // Use React-compatible value setting
                                   // IMPORTANT: Use HTMLTextAreaElement for textareas, HTMLInputElement for inputs
@@ -7159,9 +9233,9 @@ class RegistrationManager {
                                       nativeSetter2 = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                                     }
                                     nativeSetter2.call(signatureInput, fullName);
-                                    console.log('[Luma Auto Register] ✓ Set signature value via native ' + signatureInput.tagName + ' setter');
+                                    console.log('[Event Auto Register] ✓ Set signature value via native ' + signatureInput.tagName + ' setter');
                                   } catch (e) {
-                                    console.log('[Luma Auto Register] Native setter failed, using direct assignment: ' + e.message);
+                                    console.log('[Event Auto Register] Native setter failed, using direct assignment: ' + e.message);
                                     signatureInput.value = fullName;
                                   }
                                   
@@ -7177,7 +9251,7 @@ class RegistrationManager {
                                   // Also try blur event to ensure React processes the change
                                   signatureInput.dispatchEvent(new Event('blur', { bubbles: true }));
                                   
-                                  console.log('[Luma Auto Register] Signature value after fill: "' + signatureInput.value + '"');
+                                  console.log('[Event Auto Register] Signature value after fill: "' + signatureInput.value + '"');
                                   
                                   // Find and click "Sign & Accept" button - add delay to let React process the change
                                   setTimeout(function () {
@@ -7195,32 +9269,32 @@ class RegistrationManager {
                                     }
                                     
                                     if (signButton) {
-                                      console.log('[Luma Auto Register] Clicking "Sign & Accept" button...');
+                                      console.log('[Event Auto Register] Clicking "Sign & Accept" button...');
                                       signButton.click();
                                       
                                       // Wait for modal to close and then check success
                                       setTimeout(function () {
-                                        console.log('[Luma Auto Register] ✓ Post-submit terms modal handled, proceeding to success check...');
+                                        console.log('[Event Auto Register] ✓ Post-submit terms modal handled, proceeding to success check...');
                                         callback();
                                       }, 1500);
                                     } else {
-                                      console.log('[Luma Auto Register] ⚠️ Could not find "Sign & Accept" button');
+                                      console.log('[Event Auto Register] ⚠️ Could not find "Sign & Accept" button');
                                       callback();
                                     }
                                   }, 500);
                                 } else {
-                                  console.log('[Luma Auto Register] ⚠️ Could not find signature input in terms modal');
+                                  console.log('[Event Auto Register] ⚠️ Could not find signature input in terms modal');
                                   callback();
                                 }
                               } else {
-                                console.log('[Luma Auto Register] No post-submit terms modal found, proceeding...');
+                                console.log('[Event Auto Register] No post-submit terms modal found, proceeding...');
                                 callback();
                               }
                             };
                             
                             // Function to start the success checking process (defined first so it can be called)
                             var startSuccessChecking = function () {
-                              console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT (initial check after 2s) ===');
+                              console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT (initial check after 2s) ===');
 
                               // Helper function to normalize text (handles curly quotes etc.)
                               var normalizeText = function (str) {
@@ -7265,13 +9339,16 @@ class RegistrationManager {
                                 for (var ve = 0; ve < validationErrors.length; ve++) {
                                   var errorEl = validationErrors[ve];
                                   if (errorEl.offsetParent !== null) { // Only visible errors
-                                    var errorTextContent = (errorEl.textContent || '').toLowerCase();
-                                    if (errorTextContent.indexOf('required') > -1 ||
+                                    var errorTextContent = (errorEl.textContent || '').toLowerCase().trim();
+                                    // Only count as error if trimmed text has actual content and matches error patterns
+                                    if (errorTextContent.length > 0 && (
+                                      errorTextContent.indexOf('required') > -1 ||
                                       errorTextContent.indexOf('field is required') > -1 ||
                                       errorTextContent.indexOf('this field is required') > -1 ||
                                       errorTextContent.indexOf('please fill') > -1 ||
                                       errorTextContent.indexOf('must be') > -1 ||
-                                      (errorTextContent.length > 0 && errorTextContent.length < 100)) {
+                                      errorTextContent.indexOf('invalid') > -1 ||
+                                      errorTextContent.indexOf('enter a valid') > -1)) {
                                       hasValidationErrors = true;
                                       errorText += ' ' + errorTextContent;
                                     }
@@ -7292,7 +9369,7 @@ class RegistrationManager {
                                     borderColor.toLowerCase().indexOf('red') > -1) {
                                     hasValidationErrors = true;
                                     inputsWithErrors++;
-                                    console.log('[Luma Auto Register] Found input with red border (validation error)');
+                                    console.log('[Event Auto Register] Found input with red border (validation error)');
                                   }
                                   if (input.getAttribute('aria-invalid') === 'true') {
                                     hasValidationErrors = true;
@@ -7311,19 +9388,19 @@ class RegistrationManager {
 
                                 // If button is processing, wait longer - don't mark as failed yet
                                 if (isButtonProcessing) {
-                                  console.log('[Luma Auto Register] Submit button is processing (disabled/loading), waiting longer...');
+                                  console.log('[Event Auto Register] Submit button is processing (disabled/loading), waiting longer...');
                                   return { success: false, bodyText: bodyText, bodyHTML: bodyHTML, isProcessing: true, hasForm: true, hasErrors: false, failureIndicators: false };
                                 }
 
                                 // If form is still visible or validation errors exist, DEFINITELY failed
                                 if (isSubmitButtonStillThere || hasValidationErrors || failureIndicators) {
-                                  console.log('[Luma Auto Register] Form still visible or validation errors present - registration DEFINITELY failed');
-                                  console.log('[Luma Auto Register] Submit button still visible: ' + isSubmitButtonStillThere);
-                                  console.log('[Luma Auto Register] Submit button disabled/processing: ' + isButtonProcessing);
-                                  console.log('[Luma Auto Register] Validation errors: ' + hasValidationErrors + ' (inputs with errors: ' + inputsWithErrors + ')');
-                                  console.log('[Luma Auto Register] Failure indicators: ' + failureIndicators);
+                                  console.log('[Event Auto Register] Form still visible or validation errors present - registration DEFINITELY failed');
+                                  console.log('[Event Auto Register] Submit button still visible: ' + isSubmitButtonStillThere);
+                                  console.log('[Event Auto Register] Submit button disabled/processing: ' + isButtonProcessing);
+                                  console.log('[Event Auto Register] Validation errors: ' + hasValidationErrors + ' (inputs with errors: ' + inputsWithErrors + ')');
+                                  console.log('[Event Auto Register] Failure indicators: ' + failureIndicators);
                                   if (errorText) {
-                                    console.log('[Luma Auto Register] Error text: ' + errorText.substring(0, 200));
+                                    console.log('[Event Auto Register] Error text: ' + errorText.substring(0, 200));
                                   }
                                   // NEVER mark as success if form is still there or errors exist
                                   return { success: false, bodyText: bodyText, bodyHTML: bodyHTML, hasForm: true, hasErrors: hasValidationErrors, failureIndicators: failureIndicators };
@@ -7335,7 +9412,7 @@ class RegistrationManager {
                                   // Check if modal contains form elements
                                   var modalHasForm = modalStillOpen.querySelector('form, input, textarea, button[type="submit"]');
                                   if (modalHasForm) {
-                                    console.log('[Luma Auto Register] Modal still open with form elements - registration likely failed');
+                                    console.log('[Event Auto Register] Modal still open with form elements - registration likely failed');
                                     return { success: false, bodyText: bodyText, bodyHTML: bodyHTML, hasForm: true, hasErrors: false };
                                   }
                                 }
@@ -7415,21 +9492,21 @@ class RegistrationManager {
                                 // - AND we have at least some indication of success (keyword or high confidence)
                                 try {
                                   if (!success && !isSubmitButtonStillThere && !hasValidationErrors && !failureIndicators &&
-                                    typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
+                                    typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
                                     // Even with network flag, require at least one success indicator
                                     if (hasSuccessKeyword || highConfidenceSuccess) {
-                                      console.log('[Luma Auto Register] Success inferred from network response + success indicators (standard form submit)');
+                                      console.log('[Event Auto Register] Success inferred from network response + success indicators (standard form submit)');
                                       success = true;
                                     } else {
-                                      console.log('[Luma Auto Register] Network flag present but no success indicators found - not marking as success');
+                                      console.log('[Event Auto Register] Network flag present but no success indicators found - not marking as success');
                                     }
                                   }
                                 } catch (networkFlagError) {
-                                  console.log('[Luma Auto Register] Error while checking network success flag: ' + networkFlagError.message);
+                                  console.log('[Event Auto Register] Error while checking network success flag: ' + networkFlagError.message);
                                 }
 
                                 if (success) {
-                                  console.log('[Luma Auto Register] Success confirmed with ' + successKeywordCount + ' keyword(s): ' + foundSuccessKeywords.join(', '));
+                                  console.log('[Event Auto Register] Success confirmed with ' + successKeywordCount + ' keyword(s): ' + foundSuccessKeywords.join(', '));
                                 }
 
                                 return {
@@ -7449,7 +9526,7 @@ class RegistrationManager {
                               function handleResult(result, checkNumber) {
                                 // STRICT: If form is still visible or has errors, registration DEFINITELY failed
                                 if (result.hasForm || result.hasErrors || result.failureIndicators) {
-                                  console.log('[Luma Auto Register] ✗✗✗ REGISTRATION FAILED - Form still visible or validation errors present (check ' + checkNumber + ')');
+                                  console.log('[Event Auto Register] ✗✗✗ REGISTRATION FAILED - Form still visible or validation errors present (check ' + checkNumber + ')');
                                   var errorMsg = 'Registration failed';
                                   if (result.hasErrors) {
                                     errorMsg += ' (validation errors detected)';
@@ -7469,8 +9546,8 @@ class RegistrationManager {
 
                                 // Only mark as success if we have clear success indicators
                                 if (result.success && result.keywordCount > 0) {
-                                  console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (check ' + checkNumber + ')');
-                                  console.log('[Luma Auto Register] Success keywords found: ' + result.keywords.join(', '));
+                                  console.log('[Event Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (check ' + checkNumber + ')');
+                                  console.log('[Event Auto Register] Success keywords found: ' + result.keywords.join(', '));
                                   resolve({
                                     success: true,
                                     message: 'Registered successfully'
@@ -7480,9 +9557,9 @@ class RegistrationManager {
 
                                 // Continue to next check if not processing and no clear result
                                 if (!result.isProcessing) {
-                                  console.log('[Luma Auto Register] ⚠️ Could not confirm registration (check ' + checkNumber + ') - no clear success indicators');
-                                  console.log('[Luma Auto Register] Success keyword count: ' + result.keywordCount);
-                                  console.log('[Luma Auto Register] Page text sample: ' + result.bodyText.substring(0, 200));
+                                  console.log('[Event Auto Register] ⚠️ Could not confirm registration (check ' + checkNumber + ') - no clear success indicators');
+                                  console.log('[Event Auto Register] Success keyword count: ' + result.keywordCount);
+                                  console.log('[Event Auto Register] Page text sample: ' + result.bodyText.substring(0, 200));
                                 }
                               }
 
@@ -7491,11 +9568,11 @@ class RegistrationManager {
 
                               // If button is still processing, wait longer before checking again
                               if (result1.isProcessing) {
-                                console.log('[Luma Auto Register] Button still processing, waiting 3 more seconds...');
+                                console.log('[Event Auto Register] Button still processing, waiting 3 more seconds...');
                                 setTimeout(function () {
                                   var result1b = checkForSuccess();
                                   if (result1b.isProcessing) {
-                                    console.log('[Luma Auto Register] Button still processing, waiting 3 more seconds...');
+                                    console.log('[Event Auto Register] Button still processing, waiting 3 more seconds...');
                                     setTimeout(function () {
                                       var result1c = checkForSuccess();
                                       handleResult(result1c, 1);
@@ -7515,7 +9592,7 @@ class RegistrationManager {
 
                                 // If still processing, wait more
                                 if (result2.isProcessing) {
-                                  console.log('[Luma Auto Register] Button still processing, waiting 3 more seconds...');
+                                  console.log('[Event Auto Register] Button still processing, waiting 3 more seconds...');
                                   setTimeout(function () {
                                     var result2b = checkForSuccess();
                                     handleResult(result2b, 2);
@@ -7531,7 +9608,7 @@ class RegistrationManager {
 
                                   // If still processing, wait more
                                   if (result3.isProcessing) {
-                                    console.log('[Luma Auto Register] Button still processing, waiting 3 more seconds...');
+                                    console.log('[Event Auto Register] Button still processing, waiting 3 more seconds...');
                                     setTimeout(function () {
                                       var result3b = checkForSuccess();
                                       handleResult(result3b, 3);
@@ -7545,7 +9622,7 @@ class RegistrationManager {
                                   setTimeout(function () {
                                     var result4 = checkForSuccess();
                                     if (result4.isProcessing) {
-                                      console.log('[Luma Auto Register] Button still processing after 11 seconds, marking as failed');
+                                      console.log('[Event Auto Register] Button still processing after 11 seconds, marking as failed');
                                       resolve({
                                         success: false,
                                         message: 'Registration timed out - button still processing'
@@ -7554,9 +9631,9 @@ class RegistrationManager {
                                       handleResult(result4, 4);
                                       // If we get here and no success, mark as failed
                                       if (!result4.success) {
-                                        console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (final check)');
-                                        console.log('[Luma Auto Register] Success keyword count: ' + result4.keywordCount);
-                                        console.log('[Luma Auto Register] Page text sample: ' + result4.bodyText.substring(0, 200));
+                                        console.log('[Event Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (final check)');
+                                        console.log('[Event Auto Register] Success keyword count: ' + result4.keywordCount);
+                                        console.log('[Event Auto Register] Page text sample: ' + result4.bodyText.substring(0, 200));
                                         resolve({
                                           success: false,
                                           message: 'Could not confirm registration - please check manually'
@@ -7583,12 +9660,10 @@ class RegistrationManager {
                               bodyHTML.indexOf('challenge-platform') > -1 ||
                               bodyHTML.indexOf('turnstile') > -1 ||
                               bodyHTML.indexOf('challenges.cloudflare.com') > -1 ||
-                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null ||
-                              // Check if page content looks like it's showing a script (common during Cloudflare challenge)
-                              (bodyText.indexOf('(function()') > -1 && bodyText.indexOf('settheme') > -1);
+                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null;
 
                             if (hasCloudflare) {
-                              console.log('[Luma Auto Register] ⚠️ Cloudflare challenge detected - waiting for it to complete before checking success...');
+                              console.log('[Event Auto Register] ⚠️ Cloudflare challenge detected - waiting for it to complete before checking success...');
 
                               // Poll for Cloudflare completion
                               var checkCloudflareComplete = function (attempts, maxAttempts) {
@@ -7610,23 +9685,23 @@ class RegistrationManager {
                                   (bodyText2.indexOf('(function()') > -1 && bodyText2.indexOf('settheme') > -1);
                                 
                                 // Also check if network success was detected - if so, we can skip Cloudflare waiting
-                                var networkSuccessDetected = typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag;
+                                var networkSuccessDetected = typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag;
 
                                 if (networkSuccessDetected) {
-                                  console.log('[Luma Auto Register] ✓ Network success detected - skipping remaining Cloudflare wait');
+                                  console.log('[Event Auto Register] ✓ Network success detected - skipping remaining Cloudflare wait');
                                   setTimeout(function () {
                                     handlePostSubmitTermsModal(startSuccessChecking);
                                   }, 1000); // Short delay to let page settle
                                 } else if (!stillHasCloudflare || attempts >= maxAttempts) {
                                   if (!stillHasCloudflare) {
-                                    console.log('[Luma Auto Register] ✓ Cloudflare challenge completed (after ' + attempts + ' checks)!');
+                                    console.log('[Event Auto Register] ✓ Cloudflare challenge completed (after ' + attempts + ' checks)!');
                                   } else {
-                                    console.log('[Luma Auto Register] ⚠️ Cloudflare challenge still present after ' + maxAttempts + ' checks, proceeding with success check anyway...');
+                                    console.log('[Event Auto Register] ⚠️ Cloudflare challenge still present after ' + maxAttempts + ' checks, proceeding with success check anyway...');
                                   }
 
                                   // Cloudflare completed (or timed out) - wait additional delay before checking success
                                   // This gives time for the success message to appear after Cloudflare completes
-                                  console.log('[Luma Auto Register] Waiting 3 seconds after Cloudflare completion before checking success...');
+                                  console.log('[Event Auto Register] Waiting 3 seconds after Cloudflare completion before checking success...');
                                   setTimeout(function () {
                                     handlePostSubmitTermsModal(startSuccessChecking);
                                   }, 3000);
@@ -7647,10 +9722,10 @@ class RegistrationManager {
                           }, 2000); // Initial 2 second delay before checking for Cloudflare/success
 
                           // If no terms checkbox, proceed with submit immediately
-                          console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON ===');
-                          console.log('[Luma Auto Register] Button text: "' + submitBtn.textContent + '"');
-                          console.log('[Luma Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
-                          console.log('[Luma Auto Register] Button type: ' + (submitBtn.type || 'none'));
+                          console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON ===');
+                          console.log('[Event Auto Register] Button text: "' + submitBtn.textContent + '"');
+                          console.log('[Event Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
+                          console.log('[Event Auto Register] Button type: ' + (submitBtn.type || 'none'));
 
                           // Mark form as submitted to prevent re-scanning from interfering
                           if (typeof window !== 'undefined') {
@@ -7662,13 +9737,13 @@ class RegistrationManager {
                           submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                           submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                          console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                          console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
 
                           // Wait for submission to process
                           setTimeout(function () {
                             // Function to perform the actual success checking (defined first so it can be called)
                             function startSuccessCheckBlock2() {
-                              console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT ===');
+                              console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT ===');
                               var bodyText = document.body.textContent || '';
 
                               // Helper to normalize text (handle curly quotes, case, etc.)
@@ -7725,11 +9800,16 @@ class RegistrationManager {
                               for (var ve = 0; ve < validationErrors.length; ve++) {
                                 var errorEl = validationErrors[ve];
                                 if (errorEl.offsetParent !== null) {
-                                  var errorTextContent = (errorEl.textContent || '').toLowerCase();
-                                  if (errorTextContent.indexOf('required') > -1 ||
+                                  var errorTextContent = (errorEl.textContent || '').toLowerCase().trim();
+                                  // Only count as error if trimmed text has actual content and matches error patterns
+                                  if (errorTextContent.length > 0 && (
+                                    errorTextContent.indexOf('required') > -1 ||
                                     errorTextContent.indexOf('field is required') > -1 ||
                                     errorTextContent.indexOf('this field is required') > -1 ||
-                                    errorTextContent.length > 0 && errorTextContent.length < 100) {
+                                    errorTextContent.indexOf('please fill') > -1 ||
+                                    errorTextContent.indexOf('must be') > -1 ||
+                                    errorTextContent.indexOf('invalid') > -1 ||
+                                    errorTextContent.indexOf('enter a valid') > -1)) {
                                     hasValidationErrors = true;
                                     errorText += ' ' + errorTextContent;
                                   }
@@ -7757,7 +9837,7 @@ class RegistrationManager {
 
                               // STRICT: If form is still visible or has errors, DEFINITELY failed
                               if (hasValidationErrors || isSubmitButtonStillThere || failureIndicators) {
-                                console.log('[Luma Auto Register] ✗✗✗ REGISTRATION FAILED');
+                                console.log('[Event Auto Register] ✗✗✗ REGISTRATION FAILED');
 
                                 // Create user-friendly error message
                                 var userFriendlyMessage = '';
@@ -7769,7 +9849,7 @@ class RegistrationManager {
                                   userFriendlyMessage += 'Missing or invalid: ' + missingFieldsList + '. ';
                                   userFriendlyMessage += 'Please check your settings or register manually.';
                                   technicalDetails.push('Validation errors: ' + missingFieldsList + ' (inputs with errors: ' + inputsWithErrors + ')');
-                                  console.log('[Luma Auto Register] Validation errors detected! Missing fields: ' + missingFieldsList + ' (inputs with errors: ' + inputsWithErrors + ')');
+                                  console.log('[Event Auto Register] Validation errors detected! Missing fields: ' + missingFieldsList + ' (inputs with errors: ' + inputsWithErrors + ')');
                                 }
 
                                 if (isSubmitButtonStillThere) {
@@ -7778,7 +9858,7 @@ class RegistrationManager {
                                     userFriendlyMessage += 'This might be because the form requires manual review or has additional steps.';
                                   }
                                   technicalDetails.push('Submit button still visible');
-                                  console.log('[Luma Auto Register] Submit button still visible');
+                                  console.log('[Event Auto Register] Submit button still visible');
                                 }
 
                                 if (failureIndicators) {
@@ -7787,12 +9867,12 @@ class RegistrationManager {
                                     userFriendlyMessage += 'This could be due to event capacity, network issues, or form validation problems.';
                                   }
                                   technicalDetails.push('Failure indicators found in page content');
-                                  console.log('[Luma Auto Register] Failure indicators found');
+                                  console.log('[Event Auto Register] Failure indicators found');
                                 }
 
                                 // Remove overlay when registration fails
                                 try {
-                                  var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                                  var overlay = document.getElementById('__eventAutoRegisterOverlay');
                                   if (overlay && overlay.parentNode) {
                                     overlay.parentNode.removeChild(overlay);
                                   }
@@ -7809,7 +9889,7 @@ class RegistrationManager {
                               }
 
                               if (hasValidationErrors) {
-                                console.log('[Luma Auto Register] ⚠️ Validation errors detected! Missing fields: ' + missingFields.join(', '));
+                                console.log('[Event Auto Register] ⚠️ Validation errors detected! Missing fields: ' + missingFields.join(', '));
                               }
 
                               // Check for success keywords - STRICT MODE
@@ -7846,18 +9926,18 @@ class RegistrationManager {
 
                               // IMPORTANT: Trust network success flag - if the API returned success, that's definitive
                               // This handles cases where Cloudflare/Turnstile is blocking the page content check
-                              if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                console.log('[Luma Auto Register] ✓ Success confirmed via network response (API returned success)');
-                                success = true;
+                              if (!success && typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                console.log('[Event Auto Register] ✓ Success confirmed via network response (API returned success)');
+                                  success = true;
                               }
 
                               if (success) {
-                                console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED!');
-                                console.log('[Luma Auto Register] Success keywords found: ' + foundSuccessKeywords.join(', '));
+                                console.log('[Event Auto Register] ✓✓✓ REGISTRATION CONFIRMED!');
+                                console.log('[Event Auto Register] Success keywords found: ' + foundSuccessKeywords.join(', '));
 
                                 // Remove overlay when registration succeeds
                                 try {
-                                  var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                                  var overlay = document.getElementById('__eventAutoRegisterOverlay');
                                   if (overlay && overlay.parentNode) {
                                     overlay.parentNode.removeChild(overlay);
                                   }
@@ -7868,9 +9948,9 @@ class RegistrationManager {
                                   message: 'Registered successfully'
                                 });
                               } else {
-                                console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (first check)');
-                                console.log('[Luma Auto Register] Success keyword count: ' + successKeywordCount);
-                                console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 200));
+                                console.log('[Event Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (first check)');
+                                console.log('[Event Auto Register] Success keyword count: ' + successKeywordCount);
+                                console.log('[Event Auto Register] Page text sample: ' + bodyText.substring(0, 200));
 
                                 // Try checking again after a longer delay (page might still be updating)
                                 setTimeout(function () {
@@ -7883,7 +9963,7 @@ class RegistrationManager {
                                   var isSubmitButtonStillThere2 = submitButtonStillVisible2 && submitButtonStillVisible2.offsetParent !== null;
 
                                   if (hasValidationErrors2 || isSubmitButtonStillThere2) {
-                                    console.log('[Luma Auto Register] ✗✗✗ REGISTRATION FAILED (second check)');
+                                    console.log('[Event Auto Register] ✗✗✗ REGISTRATION FAILED (second check)');
                                     resolve({
                                       success: false,
                                       message: 'Registration failed - validation errors or form still visible'
@@ -7903,18 +9983,18 @@ class RegistrationManager {
                                   var success2 = successKeywordCount2 > 0;
 
                                   // IMPORTANT: Trust network success flag - if the API returned success, that's definitive
-                                  if (!success2 && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                    console.log('[Luma Auto Register] ✓ Success confirmed via network response (API returned success - second check)');
-                                    success2 = true;
+                                  if (!success2 && typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                    console.log('[Event Auto Register] ✓ Success confirmed via network response (API returned success - second check)');
+                                      success2 = true;
                                   }
 
                                   if (success2) {
-                                    console.log('[Luma Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (second check)');
-                                    console.log('[Luma Auto Register] Success keywords found: ' + foundSuccessKeywords2.join(', '));
+                                    console.log('[Event Auto Register] ✓✓✓ REGISTRATION CONFIRMED! (second check)');
+                                    console.log('[Event Auto Register] Success keywords found: ' + foundSuccessKeywords2.join(', '));
 
                                     // Remove overlay when registration succeeds
                                     try {
-                                      var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                                      var overlay = document.getElementById('__eventAutoRegisterOverlay');
                                       if (overlay && overlay.parentNode) {
                                         overlay.parentNode.removeChild(overlay);
                                       }
@@ -7926,17 +10006,17 @@ class RegistrationManager {
                                     });
                                   } else {
                                     // FINAL CHECK: Poll for network flag multiple times (async response may be slow)
-                                    console.log('[Luma Auto Register] Polling for network response (up to 10 seconds)...');
+                                    console.log('[Event Auto Register] Polling for network response (up to 5 seconds)...');
                                     var networkPollAttempts = 0;
-                                    var maxNetworkPollAttempts = 20; // 20 attempts * 500ms = 10 seconds
+                                    var maxNetworkPollAttempts = 10; // 10 attempts * 500ms = 5 seconds
                                     
                                     var pollForNetworkSuccess = function() {
                                       networkPollAttempts++;
                                       
-                                      if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                        console.log('[Luma Auto Register] ✓ Success confirmed via network response (poll attempt ' + networkPollAttempts + ')');
+                                      if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                        console.log('[Event Auto Register] ✓ Success confirmed via network response (poll attempt ' + networkPollAttempts + ')');
                                         try {
-                                          var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                                          var overlay = document.getElementById('__eventAutoRegisterOverlay');
                                           if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
                                         } catch (e) { }
                                         resolve({ success: true, message: 'Registered successfully (network confirmed)' });
@@ -7950,22 +10030,22 @@ class RegistrationManager {
                                       }
                                       
                                       // All polls exhausted - mark as failed
-                                      console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (final check after ' + networkPollAttempts + ' network polls)');
-                                      console.log('[Luma Auto Register] Success keyword count: ' + successKeywordCount2);
-                                      console.log('[Luma Auto Register] Page text sample: ' + bodyText2.substring(0, 200));
+                                      console.log('[Event Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (final check after ' + networkPollAttempts + ' network polls)');
+                                    console.log('[Event Auto Register] Success keyword count: ' + successKeywordCount2);
+                                    console.log('[Event Auto Register] Page text sample: ' + bodyText2.substring(0, 200));
 
-                                      // Remove overlay when registration cannot be confirmed
-                                      try {
-                                        var overlay = document.getElementById('__lumaAutoRegisterOverlay');
-                                        if (overlay && overlay.parentNode) {
-                                          overlay.parentNode.removeChild(overlay);
-                                        }
-                                      } catch (e) { }
+                                    // Remove overlay when registration cannot be confirmed
+                                    try {
+                                      var overlay = document.getElementById('__eventAutoRegisterOverlay');
+                                      if (overlay && overlay.parentNode) {
+                                        overlay.parentNode.removeChild(overlay);
+                                      }
+                                    } catch (e) { }
 
-                                      resolve({
-                                        success: false,
-                                        message: 'Could not confirm registration - please check manually'
-                                      });
+                                    resolve({
+                                      success: false,
+                                      message: 'Could not confirm registration - please check manually'
+                                    });
                                     };
                                     
                                     // Start polling
@@ -7990,12 +10070,10 @@ class RegistrationManager {
                               bodyHTMLCheck.indexOf('challenge-platform') > -1 ||
                               bodyHTMLCheck.indexOf('turnstile') > -1 ||
                               bodyHTMLCheck.indexOf('challenges.cloudflare.com') > -1 ||
-                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null ||
-                              // Check if page content looks like it's showing a script (common during Cloudflare challenge)
-                              (bodyTextCheck.indexOf('(function()') > -1 && bodyTextCheck.indexOf('settheme') > -1);
+                              document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null;
 
                             if (hasCloudflareCheck) {
-                              console.log('[Luma Auto Register] ⚠️ Cloudflare challenge detected - waiting for it to complete before checking success...');
+                              console.log('[Event Auto Register] ⚠️ Cloudflare challenge detected - waiting for it to complete before checking success...');
 
                               // Poll for Cloudflare completion
                               var checkCloudflareComplete2 = function (attempts, maxAttempts) {
@@ -8017,23 +10095,23 @@ class RegistrationManager {
                                   (bodyText2.indexOf('(function()') > -1 && bodyText2.indexOf('settheme') > -1);
                                 
                                 // Also check if network success was detected - if so, we can skip Cloudflare waiting
-                                var networkSuccessDetected = typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag;
+                                var networkSuccessDetected = typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag;
 
                                 if (networkSuccessDetected) {
-                                  console.log('[Luma Auto Register] ✓ Network success detected - skipping remaining Cloudflare wait');
+                                  console.log('[Event Auto Register] ✓ Network success detected - skipping remaining Cloudflare wait');
                                   setTimeout(function () {
                                     startSuccessCheckBlock2();
                                   }, 1000); // Short delay to let page settle
                                 } else if (!stillHasCloudflare || attempts >= maxAttempts) {
                                   if (!stillHasCloudflare) {
-                                    console.log('[Luma Auto Register] ✓ Cloudflare challenge completed (after ' + attempts + ' checks)!');
+                                    console.log('[Event Auto Register] ✓ Cloudflare challenge completed (after ' + attempts + ' checks)!');
                                   } else {
-                                    console.log('[Luma Auto Register] ⚠️ Cloudflare challenge still present after ' + maxAttempts + ' checks, proceeding with success check anyway...');
+                                    console.log('[Event Auto Register] ⚠️ Cloudflare challenge still present after ' + maxAttempts + ' checks, proceeding with success check anyway...');
                                   }
 
                                   // Cloudflare completed (or timed out) - wait additional delay before checking success
                                   // This gives time for the success message to appear after Cloudflare completes
-                                  console.log('[Luma Auto Register] Waiting 3 seconds after Cloudflare completion before checking success...');
+                                  console.log('[Event Auto Register] Waiting 3 seconds after Cloudflare completion before checking success...');
                                   setTimeout(function () {
                                     startSuccessCheckBlock2();
                                   }, 3000);
@@ -8063,7 +10141,7 @@ class RegistrationManager {
                           // Skip duplicate logical questions (same label) to avoid repeatedly
                           // opening the same "Which one are you?" dropdown several times.
                           if (labelKey && processedDropdownLabels[labelKey]) {
-                            console.log('[Luma Auto Register] Skipping duplicate custom dropdown for label: ' + labelKey);
+                            console.log('[Event Auto Register] Skipping duplicate custom dropdown for label: ' + labelKey);
                             processCustomDropdown(index + 1);
                             return;
                           }
@@ -8071,7 +10149,7 @@ class RegistrationManager {
                             processedDropdownLabels[labelKey] = true;
                           }
 
-                          console.log('[Luma Auto Register] Processing custom dropdown ' + (index + 1) + '/' + customDropdownsToProcess.length + ': ' + dropdownInfo.label + (isMultiSelect ? ' (multi-select)' : ''));
+                          console.log('[Event Auto Register] Processing custom dropdown ' + (index + 1) + '/' + customDropdownsToProcess.length + ': ' + dropdownInfo.label + (isMultiSelect ? ' (multi-select)' : ''));
 
                           try {
                             // Click to open dropdown - try clicking the input or its parent container
@@ -8084,7 +10162,7 @@ class RegistrationManager {
                             }
 
                             clickTarget.click();
-                            console.log('[Luma Auto Register] Clicked to open dropdown');
+                            console.log('[Event Auto Register] Clicked to open dropdown');
 
                             // Helper function to process menu options (can be called multiple times if needed)
                             // Define it here so it can be called from setTimeout
@@ -8093,12 +10171,12 @@ class RegistrationManager {
                               // Find dropdown menu options - look for clickable items inside the menu
                               // Try to find options with role="option" first (most reliable)
                               var menuOptions = menuWrapper.querySelectorAll('[role="option"]:not([aria-disabled="true"])');
-                              console.log('[Luma Auto Register] Found ' + menuOptions.length + ' options with role="option"');
+                              console.log('[Event Auto Register] Found ' + menuOptions.length + ' options with role="option"');
 
                               // If no role="option" found, look for Luma-specific menu items
                               if (menuOptions.length === 0) {
                                 menuOptions = menuWrapper.querySelectorAll('[class*="lux-menu-item"]:not([aria-disabled="true"])');
-                                console.log('[Luma Auto Register] Found ' + menuOptions.length + ' options with lux-menu-item class');
+                                console.log('[Event Auto Register] Found ' + menuOptions.length + ' options with lux-menu-item class');
                               }
 
                               // If still no options, look for other patterns
@@ -8110,12 +10188,12 @@ class RegistrationManager {
                                   'div[class*="Option"]:not([disabled]), ' +
                                   'li:not([disabled])'
                                 );
-                                console.log('[Luma Auto Register] Found ' + menuOptions.length + ' options with alternative selectors');
+                                console.log('[Event Auto Register] Found ' + menuOptions.length + ' options with alternative selectors');
                               }
 
                               // If still no options, look for ANY clickable/selectable elements
                               if (menuOptions.length === 0) {
-                                console.log('[Luma Auto Register] No options found with standard selectors, trying broader search...');
+                                console.log('[Event Auto Register] No options found with standard selectors, trying broader search...');
                                 // Look for any elements that might be options
                                 var allElements = menuWrapper.querySelectorAll('div, li, button, span, a');
                                 var candidateOptions = Array.from(allElements).filter(function (el) {
@@ -8128,15 +10206,15 @@ class RegistrationManager {
                                     !text.match(/required/i);
                                 });
 
-                                console.log('[Luma Auto Register] Found ' + candidateOptions.length + ' candidate elements');
+                                console.log('[Event Auto Register] Found ' + candidateOptions.length + ' candidate elements');
 
                                 // Log first few candidates for debugging
                                 if (candidateOptions.length > 0) {
-                                  console.log('[Luma Auto Register] Candidate options (first 5):');
+                                  console.log('[Event Auto Register] Candidate options (first 5):');
                                   for (var cand = 0; cand < Math.min(5, candidateOptions.length); cand++) {
                                     var candEl = candidateOptions[cand];
                                     var candText = (candEl.textContent || '').trim();
-                                    console.log('[Luma Auto Register]   - ' + candEl.tagName + ' (' + (candEl.className || 'no class') + '): "' + candText.substring(0, 30) + '"');
+                                    console.log('[Event Auto Register]   - ' + candEl.tagName + ' (' + (candEl.className || 'no class') + '): "' + candText.substring(0, 30) + '"');
                                   }
                                 }
 
@@ -8196,7 +10274,7 @@ class RegistrationManager {
                                   return 0;
                                 });
 
-                                console.log('[Luma Auto Register] Filtered to ' + filteredCandidates.length + ' valid candidates');
+                                console.log('[Event Auto Register] Filtered to ' + filteredCandidates.length + ' valid candidates');
 
                                 // Use filtered candidates (remove the <= 15 limit)
                                 if (filteredCandidates.length > 0) {
@@ -8236,7 +10314,7 @@ class RegistrationManager {
                               }
                               menuOptions = filteredOptions;
 
-                              console.log('[Luma Auto Register] Found ' + menuOptions.length + ' dropdown options');
+                              console.log('[Event Auto Register] Found ' + menuOptions.length + ' dropdown options');
 
                               var selectedOption = null;
                               var placeholderPattern = /^(select|choose|search|--|please select|select one|pick one|choose one|none|^$)/i;
@@ -8267,16 +10345,21 @@ class RegistrationManager {
                                 }
                                 if (hasYes || hasNo) {
                                   isSimpleYesNoMultiSelect = true;
-                                  console.log('[Luma Auto Register] Detected simple Yes/No multi-select dropdown (only ' + menuOptions.length + ' options)');
+                                  console.log('[Event Auto Register] Detected simple Yes/No multi-select dropdown (only ' + menuOptions.length + ' options)');
                                 } else {
                                   isSimpleYesNoMultiSelect = false;
                                 }
                               }
 
-                              console.log('[Luma Auto Register] Filtered to ' + menuOptions.length + ' valid options');
+                              console.log('[Event Auto Register] Filtered to ' + menuOptions.length + ' valid options');
 
                               // Check if this is a question about donations, sponsorship, or payment - ALWAYS say "No" to these
                               var labelLower = dropdownInfo.label.toLowerCase();
+                              
+                              // Also check if any option contains "let's discuss" or similar (indicates interest/sponsor question)
+                              var optionsText = menuOptions.map(function(opt) { return (opt.textContent || opt.innerText || '').trim().toLowerCase(); }).join(' ');
+                              var hasDiscussOption = optionsText.indexOf('discuss') > -1 || optionsText.indexOf('interested') > -1 || optionsText.indexOf('contact me') > -1;
+                              
                               var isDonationOrSponsorQuestion = 
                                 labelLower.indexOf('donat') > -1 ||           // donate, donation
                                 labelLower.indexOf('sponsor') > -1 ||         // sponsor, sponsorship
@@ -8292,11 +10375,15 @@ class RegistrationManager {
                                 labelLower.indexOf('support financially') > -1 ||
                                 labelLower.indexOf('financial support') > -1 ||
                                 labelLower.indexOf('become a sponsor') > -1 ||
-                                labelLower.indexOf('interested in sponsor') > -1;
-
+                                labelLower.indexOf('interested in sponsor') > -1 ||
+                                labelLower.indexOf('partnership') > -1 ||     // partnership opportunities
+                                labelLower.indexOf('exhibitor') > -1 ||       // exhibitor
+                                labelLower.indexOf('booth') > -1 ||           // booth rental
+                                (hasDiscussOption && (labelLower.indexOf('interested') > -1 || labelLower.indexOf('opportunity') > -1 || labelLower.indexOf('service') > -1));
+                              
                               // For donation/sponsor questions, ALWAYS prefer "No"
                               if (isDonationOrSponsorQuestion && (isYesNoDropdown || isSimpleYesNoMultiSelect)) {
-                                console.log('[Luma Auto Register] ⚠️ Detected donation/sponsorship question: "' + dropdownInfo.label + '" - will select "No"');
+                                console.log('[Event Auto Register] ⚠️ Detected donation/sponsorship question: "' + dropdownInfo.label + '" - will select "No"');
                                 
                                 // Look for "No" option first
                                 for (var o = 0; o < menuOptions.length; o++) {
@@ -8304,11 +10391,19 @@ class RegistrationManager {
                                   var optText = (opt.textContent || opt.innerText || '').trim();
                                   var optTextLower = optText.toLowerCase();
 
-                                  if (optTextLower === 'no' || optTextLower === 'not yet' || optTextLower === 'no thanks' ||
-                                    optTextLower.indexOf('no') === 0 || optTextLower.indexOf('not') === 0 ||
-                                    optTextLower.indexOf('decline') > -1 || optTextLower.indexOf('skip') > -1) {
+                                  // Match "No" and related variations
+                                  var isNoOption = optTextLower === 'no' || optTextLower === 'n/a' || optTextLower === 'na' ||
+                                    optTextLower === 'none' || optTextLower === 'nope' || optTextLower === 'neither' ||
+                                    optTextLower === 'not yet' || optTextLower === 'no thanks' || optTextLower === 'not interested' ||
+                                    optTextLower === 'do not have any' || optTextLower === 'i do not have any' ||
+                                    optTextLower.indexOf('no,') === 0 || optTextLower.indexOf('no ') === 0 ||
+                                    optTextLower.indexOf('not ') === 0 || optTextLower.indexOf('nope') === 0 ||
+                                    optTextLower.indexOf('decline') > -1 || optTextLower.indexOf('skip') > -1 ||
+                                    optTextLower.indexOf('prefer not') > -1 || optTextLower.indexOf('don\'t have') > -1 ||
+                                    optTextLower.indexOf('do not have') > -1 || optTextLower.indexOf('n/a') > -1;
+                                  if (isNoOption) {
                                     selectedOption = opt;
-                                    console.log('[Luma Auto Register] ✓ Selected "No" for donation/sponsorship question: "' + optText + '"');
+                                    console.log('[Event Auto Register] ✓ Selected "No" for donation/sponsorship question: "' + optText + '"');
                                     break;
                                   }
                                 }
@@ -8317,18 +10412,18 @@ class RegistrationManager {
                                 if (!selectedOption && menuOptions.length > 0) {
                                   selectedOption = menuOptions[menuOptions.length - 1];
                                   var optText = (selectedOption.textContent || selectedOption.innerText || '').trim();
-                                  console.log('[Luma Auto Register] ✓ Selected last option for donation/sponsorship question: "' + optText + '"');
+                                  console.log('[Event Auto Register] ✓ Selected last option for donation/sponsorship question: "' + optText + '"');
                                 }
                               }
                               // For simple Yes/No multi-select dropdowns (2-3 options), just select the first option
                               else if (isSimpleYesNoMultiSelect && menuOptions.length > 0) {
                                 selectedOption = menuOptions[0];
                                 var optText = (selectedOption.textContent || selectedOption.innerText || '').trim();
-                                console.log('[Luma Auto Register] Selecting first option for simple Yes/No multi-select: "' + optText + '"');
+                                console.log('[Event Auto Register] Selecting first option for simple Yes/No multi-select: "' + optText + '"');
                               }
                               // For Yes/No dropdowns, prefer "Yes" over "No"
                               else if (isYesNoDropdown) {
-                                console.log('[Luma Auto Register] Detected Yes/No dropdown, looking for "Yes" option');
+                                console.log('[Event Auto Register] Detected Yes/No dropdown, looking for "Yes" option');
 
                                 // First, try to find exact "Yes" or "Yes!" match
                                 for (var o = 0; o < menuOptions.length; o++) {
@@ -8340,7 +10435,7 @@ class RegistrationManager {
                                   if (optTextLower === 'yes' || optTextLower === 'yes!' ||
                                     optTextLower.indexOf('yes') === 0) {
                                     selectedOption = opt;
-                                    console.log('[Luma Auto Register] ✓ Found "Yes" option: "' + optText + '"');
+                                    console.log('[Event Auto Register] ✓ Found "Yes" option: "' + optText + '"');
                                     break;
                                   }
                                 }
@@ -8352,10 +10447,17 @@ class RegistrationManager {
                                     var optText = (opt.textContent || opt.innerText || '').trim();
                                     var optTextLower = optText.toLowerCase();
 
-                                    if (optTextLower === 'no' || optTextLower === 'not yet' ||
-                                      optTextLower.indexOf('no') === 0 || optTextLower.indexOf('not') === 0) {
+                                    // Match "No" and related variations
+                                    var isNoOpt = optTextLower === 'no' || optTextLower === 'n/a' || optTextLower === 'na' ||
+                                      optTextLower === 'none' || optTextLower === 'nope' || optTextLower === 'neither' ||
+                                      optTextLower === 'not yet' || optTextLower === 'no thanks' || optTextLower === 'not interested' ||
+                                      optTextLower === 'do not have any' || 
+                                      optTextLower.indexOf('no,') === 0 || optTextLower.indexOf('no ') === 0 ||
+                                      optTextLower.indexOf('not ') === 0 || optTextLower.indexOf('decline') > -1 ||
+                                      optTextLower.indexOf('prefer not') > -1 || optTextLower.indexOf('n/a') > -1;
+                                    if (isNoOpt) {
                                       selectedOption = opt;
-                                      console.log('[Luma Auto Register] ✓ Found "No" option: "' + optText + '"');
+                                      console.log('[Event Auto Register] ✓ Found "No" option: "' + optText + '"');
                                       break;
                                     }
                                   }
@@ -8449,8 +10551,29 @@ class RegistrationManager {
 
                                 // Check for t-shirt size fields
                                 if (labelLower.indexOf('shirt') > -1 || labelLower.indexOf('t-shirt') > -1 ||
-                                  labelLower.indexOf('tshirt') > -1 || labelLower.indexOf('size') > -1) {
-                                  if (settings.tshirtSize) settingsToCheck.push(settings.tshirtSize);
+                                  labelLower.indexOf('tshirt') > -1 || (labelLower.indexOf('size') > -1 && labelLower.indexOf('shirt') > -1)) {
+                                  if (settings.tshirtSize) {
+                                    // Add both the exact value and common variations
+                                    var tshirtVal = settings.tshirtSize.trim().toUpperCase();
+                                    settingsToCheck.push(tshirtVal);
+                                    settingsToCheck.push(tshirtVal.toLowerCase());
+                                    // Map common sizes
+                                    var sizeMap = {
+                                      'S': ['small', 's'],
+                                      'M': ['medium', 'm'],
+                                      'L': ['large', 'l'],
+                                      'XL': ['extra large', 'xl', 'x-large'],
+                                      'XXL': ['xx-large', 'xxl', '2xl'],
+                                      'XXXL': ['xxx-large', 'xxxl', '3xl'],
+                                      'XS': ['extra small', 'xs', 'x-small']
+                                    };
+                                    if (sizeMap[tshirtVal]) {
+                                      for (var sz = 0; sz < sizeMap[tshirtVal].length; sz++) {
+                                        settingsToCheck.push(sizeMap[tshirtVal][sz]);
+                                      }
+                                    }
+                                    console.log('[Event Auto Register] T-shirt size settings to check: ' + settingsToCheck.join(', '));
+                                  }
                                 }
 
                                 // Check for dietary restrictions fields
@@ -8584,7 +10707,7 @@ class RegistrationManager {
 
                                         if (codeMatch) {
                                           matchedOption = opt;
-                                          console.log('[Luma Auto Register] ✓ Matched option "' + optText + '" to country code: "' + settingsToCheck[s] + '"');
+                                          console.log('[Event Auto Register] ✓ Matched option "' + optText + '" to country code: "' + settingsToCheck[s] + '"');
                                           break;
                                         }
                                       } else if (settingValue.length > 2) {
@@ -8734,7 +10857,7 @@ class RegistrationManager {
                                         if (exactMatch || containsMatch || fuzzyMatch) {
                                           matchedOption = opt;
                                           var matchType = exactMatch ? 'exact' : (containsMatch ? 'contains' : 'fuzzy');
-                                          console.log('[Luma Auto Register] ✓ Matched option "' + optText + '" to setting: "' + settingsToCheck[s] + '" (' + matchType + ' match)');
+                                          console.log('[Event Auto Register] ✓ Matched option "' + optText + '" to setting: "' + settingsToCheck[s] + '" (' + matchType + ' match)');
                                           break;
                                         }
                                       }
@@ -8746,7 +10869,7 @@ class RegistrationManager {
                                   selectedOption = matchedOption;
                                 } else if (settings.autoSelectFirstOption !== false) {
                                   // No match found, select first valid option as fallback (if enabled)
-                                  console.log('[Luma Auto Register] autoSelectFirstOption setting: ' + settings.autoSelectFirstOption + ' (type: ' + typeof settings.autoSelectFirstOption + ')');
+                                  console.log('[Event Auto Register] autoSelectFirstOption setting: ' + settings.autoSelectFirstOption + ' (type: ' + typeof settings.autoSelectFirstOption + ')');
                                   for (var o = 0; o < menuOptions.length; o++) {
                                     var opt = menuOptions[o];
                                     var optText = (opt.textContent || opt.innerText || '').trim();
@@ -8759,27 +10882,27 @@ class RegistrationManager {
                                     // Select first valid option
                                     selectedOption = opt;
                                     if (isMultiSelect) {
-                                      console.log('[Luma Auto Register] ✓ No settings match found for multi-select dropdown, selecting first option: "' + optText + '"');
+                                      console.log('[Event Auto Register] ✓ No settings match found for multi-select dropdown, selecting first option: "' + optText + '"');
                                     } else {
-                                      console.log('[Luma Auto Register] ✓ No settings match found, selecting first valid option: "' + optText + '"');
+                                      console.log('[Event Auto Register] ✓ No settings match found, selecting first valid option: "' + optText + '"');
                                     }
                                     break;
                                   }
                                 } else {
                                   // autoSelectFirstOption is disabled - skip this dropdown
-                                  console.log('[Luma Auto Register] ⚠️ No settings match found and auto-select first option is DISABLED - skipping dropdown: "' + dropdownInfo.label + '"');
+                                  console.log('[Event Auto Register] ⚠️ No settings match found and auto-select first option is DISABLED - skipping dropdown: "' + dropdownInfo.label + '"');
                                 }
                               }
 
                               if (selectedOption) {
                                 // If we already selected an option for simple Yes/No multi-select, treat it as single-select
                                 if (isSimpleYesNoMultiSelect && selectedOption) {
-                                  console.log('[Luma Auto Register] Simple Yes/No multi-select - treating as single-select, clicking first option');
+                                  console.log('[Event Auto Register] Simple Yes/No multi-select - treating as single-select, clicking first option');
                                   // Treat as single-select and skip the multi-select matching logic below
                                   isMultiSelect = false;
                                 } else if (isMultiSelect && !isSimpleYesNoMultiSelect) {
                                   // For multi-select, try to match options against user settings first
-                                  console.log('[Luma Auto Register] Multi-select detected - trying to match options to settings');
+                                  console.log('[Event Auto Register] Multi-select detected - trying to match options to settings');
 
                                   // Determine which settings to check based on dropdown label
                                   var labelLower = dropdownInfo.label.toLowerCase();
@@ -8943,7 +11066,7 @@ class RegistrationManager {
                                           if (codeMatch) {
                                             matchedOptions.push(opt);
                                             matched = true;
-                                            console.log('[Luma Auto Register] ✓ Matched option "' + optText + '" to country code: "' + settingsToCheck[s] + '"');
+                                            console.log('[Event Auto Register] ✓ Matched option "' + optText + '" to country code: "' + settingsToCheck[s] + '"');
                                             break;
                                           }
                                         } else if (settingValue.length > 2) {
@@ -9091,7 +11214,7 @@ class RegistrationManager {
                                             matchedOptions.push(opt);
                                             matched = true;
                                             var matchType = exactMatch ? 'exact' : (containsMatch ? 'contains' : 'fuzzy');
-                                            console.log('[Luma Auto Register] ✓ Matched option "' + optText + '" to setting: "' + settingsToCheck[s] + '" (' + matchType + ' match)');
+                                            console.log('[Event Auto Register] ✓ Matched option "' + optText + '" to setting: "' + settingsToCheck[s] + '" (' + matchType + ' match)');
                                             break;
                                           }
                                         }
@@ -9106,25 +11229,25 @@ class RegistrationManager {
                                   // Use matched options if found, otherwise use first option as fallback (if enabled)
                                   if (matchedOptions.length > 0) {
                                     optionsToSelect = matchedOptions;
-                                    console.log('[Luma Auto Register] Found ' + matchedOptions.length + ' matching options from settings');
+                                    console.log('[Event Auto Register] Found ' + matchedOptions.length + ' matching options from settings');
                                   } else if (settings.autoSelectFirstOption !== false) {
                                     // No matches found, select ONLY the first option as a safe fallback.
                                     // Previously we chose the first 2-3 options, but this can be overly
                                     // aggressive for questions where a single choice is expected.
                                     var maxSelections = Math.min(1, unmatchedOptions.length);
                                     optionsToSelect = unmatchedOptions.slice(0, maxSelections);
-                                    console.log('[Luma Auto Register] No settings matches found, selecting first ' + optionsToSelect.length + ' option(s)');
+                                    console.log('[Event Auto Register] No settings matches found, selecting first ' + optionsToSelect.length + ' option(s)');
                                   } else {
                                     // autoSelectFirstOption is disabled - don't select anything
                                     optionsToSelect = [];
-                                    console.log('[Luma Auto Register] ⚠️ No settings match found and auto-select first option is DISABLED - skipping multi-select dropdown');
+                                    console.log('[Event Auto Register] ⚠️ No settings match found and auto-select first option is DISABLED - skipping multi-select dropdown');
                                   }
 
                                   // Select each option one by one
                                   var selectNextOption = function (optIndex) {
                                     if (optIndex >= optionsToSelect.length) {
                                       // All options selected, now close the dropdown
-                                      console.log('[Luma Auto Register] ✓ Selected ' + optionsToSelect.length + ' options in multi-select dropdown');
+                                      console.log('[Event Auto Register] ✓ Selected ' + optionsToSelect.length + ' options in multi-select dropdown');
 
                                       // Wait a bit, then close the menu
                                       // IMPORTANT: Don't use Escape or document.body.click() as it might close the main modal
@@ -9145,7 +11268,7 @@ class RegistrationManager {
                                         // Wait a moment for the selections to register, then close
                                         setTimeout(function () {
                                           if (dropdownTrigger) {
-                                            console.log('[Luma Auto Register] Clicking dropdown trigger to close multi-select menu');
+                                            console.log('[Event Auto Register] Clicking dropdown trigger to close multi-select menu');
                                             // Focus first, then click to toggle closed
                                             dropdownTrigger.focus();
                                             setTimeout(function () {
@@ -9175,14 +11298,14 @@ class RegistrationManager {
                                         setTimeout(function () {
                                           processCustomDropdown(index + 1);
                                         }, 600);
-                                      }, 400);
+                                      }, 300);
                                       return;
                                     }
 
                                     var opt = optionsToSelect[optIndex];
                                     var optText = (opt.textContent || opt.innerText || '').trim();
 
-                                    console.log('[Luma Auto Register] Clicking option ' + (optIndex + 1) + '/' + optionsToSelect.length + ': "' + optText + '"');
+                                    console.log('[Event Auto Register] Clicking option ' + (optIndex + 1) + '/' + optionsToSelect.length + ': "' + optText + '"');
 
                                     // Click the option
                                     opt.click();
@@ -9201,7 +11324,7 @@ class RegistrationManager {
 
                                 } else {
                                   // Single-select: select one option and close
-                                  console.log('[Luma Auto Register] Clicking option: "' + (selectedOption.textContent || selectedOption.innerText || '').trim() + '"');
+                                  console.log('[Event Auto Register] Clicking option: "' + (selectedOption.textContent || selectedOption.innerText || '').trim() + '"');
                                   selectedOption.click();
 
                                   // Also try mouse events for better compatibility
@@ -9209,7 +11332,7 @@ class RegistrationManager {
                                   selectedOption.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                                   selectedOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
-                                  console.log('[Luma Auto Register] ✓ Selected option in custom dropdown');
+                                  console.log('[Event Auto Register] ✓ Selected option in custom dropdown');
 
                                   // Trigger events on the dropdown input
                                   dropdown.dispatchEvent(new Event('change', { bubbles: true }));
@@ -9220,9 +11343,9 @@ class RegistrationManager {
                                   setTimeout(function () {
                                     var newValue = (dropdown.value || '').trim();
                                     if (newValue) {
-                                      console.log('[Luma Auto Register] ✓ Dropdown value set to: "' + newValue + '"');
+                                      console.log('[Event Auto Register] ✓ Dropdown value set to: "' + newValue + '"');
                                     } else {
-                                      console.log('[Luma Auto Register] ⚠️ Dropdown value not set, but option was clicked');
+                                      console.log('[Event Auto Register] ⚠️ Dropdown value not set, but option was clicked');
                                     }
                                   }, 300);
 
@@ -9232,8 +11355,8 @@ class RegistrationManager {
                                   }, 700);
                                 }
                               } else {
-                                console.log('[Luma Auto Register] ⚠️ Could not find suitable option');
-                                console.log('[Luma Auto Register] Menu wrapper HTML sample: ' + (menuWrapper.innerHTML || '').substring(0, 200));
+                                console.log('[Event Auto Register] ⚠️ Could not find suitable option');
+                                console.log('[Event Auto Register] Menu wrapper HTML sample: ' + (menuWrapper.innerHTML || '').substring(0, 200));
 
                                 // Fallback: if this \"dropdown\" is actually a plain text input/textarea,
                                 // fill it with a generic answer so the form can still submit.
@@ -9245,7 +11368,7 @@ class RegistrationManager {
                                     var currentVal = (dropdownInfo.element.value || '').trim();
                                     if (!currentVal) {
                                       var fallbackAnswer = (settings.genericFallbackAnswer || 'To be provided');
-                                      console.log('[Luma Auto Register] Using fallback answer for "' + dropdownInfo.label + '": "' + fallbackAnswer + '"');
+                                      console.log('[Event Auto Register] Using fallback answer for "' + dropdownInfo.label + '": "' + fallbackAnswer + '"');
                                       dropdownInfo.element.focus();
                                       dropdownInfo.element.value = fallbackAnswer;
                                       dropdownInfo.element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -9255,7 +11378,7 @@ class RegistrationManager {
                                     }
                                   }
                                 } catch (fallbackError) {
-                                  console.log('[Luma Auto Register] Error applying fallback answer: ' + fallbackError);
+                                  console.log('[Event Auto Register] Error applying fallback answer: ' + fallbackError);
                                 }
 
                                 if (!fallbackFilled) {
@@ -9311,7 +11434,7 @@ class RegistrationManager {
 
                                   if (hasValidOptions) {
                                     menuWrapper = menu;
-                                    console.log('[Luma Auto Register] Found menu wrapper near dropdown (hasMenuItems: ' + hasMenuItems + ')');
+                                    console.log('[Event Auto Register] Found menu wrapper near dropdown (hasMenuItems: ' + hasMenuItems + ')');
                                     break;
                                   }
                                 }
@@ -9339,7 +11462,7 @@ class RegistrationManager {
                                   var hasMenuItems = menu.querySelectorAll('[class*="lux-menu-item"], [role="option"]').length > 0;
                                   if (hasMenuItems) {
                                     menuWrapper = menu;
-                                    console.log('[Luma Auto Register] Found menu wrapper in document (portaled)');
+                                    console.log('[Event Auto Register] Found menu wrapper in document (portaled)');
                                     break;
                                   }
                                 }
@@ -9380,7 +11503,7 @@ class RegistrationManager {
 
                                   if (hasMenuItems || hasValidText) {
                                     menuWrapper = menu;
-                                    console.log('[Luma Auto Register] Found menu wrapper (hasMenuItems: ' + hasMenuItems + ', hasValidText: ' + hasValidText + ')');
+                                    console.log('[Event Auto Register] Found menu wrapper (hasMenuItems: ' + hasMenuItems + ', hasValidText: ' + hasValidText + ')');
                                     break;
                                   }
                                 }
@@ -9410,7 +11533,7 @@ class RegistrationManager {
                               }
 
                               if (!menuWrapper) {
-                                console.log('[Luma Auto Register] ⚠️ Could not find dropdown menu, trying again with more thorough search...');
+                                console.log('[Event Auto Register] ⚠️ Could not find dropdown menu, trying again with more thorough search...');
                                 // Try one more time after a longer delay with more thorough search
                                 setTimeout(function () {
                                   // Search more thoroughly - check all possible menu locations
@@ -9452,17 +11575,17 @@ class RegistrationManager {
 
                                     if (hasValidOptions) {
                                       menuWrapper = menu;
-                                      console.log('[Luma Auto Register] Found menu wrapper on retry (z-index: ' + zIndex + ', hasMenuItems: ' + hasMenuItems + ')');
+                                      console.log('[Event Auto Register] Found menu wrapper on retry (z-index: ' + zIndex + ', hasMenuItems: ' + hasMenuItems + ')');
                                       break;
                                     }
                                   }
 
                                   if (!menuWrapper) {
-                                    console.log('[Luma Auto Register] ⚠️ Could not find dropdown menu after retry');
+                                    console.log('[Event Auto Register] ⚠️ Could not find dropdown menu after retry');
                                     // Try to find the input and see if we can get its value another way
                                     var inputValue = (dropdown.value || '').trim();
                                     var inputPlaceholder = (dropdown.placeholder || '').trim();
-                                    console.log('[Luma Auto Register] Dropdown input value: "' + inputValue + '", placeholder: "' + inputPlaceholder + '"');
+                                    console.log('[Event Auto Register] Dropdown input value: "' + inputValue + '", placeholder: "' + inputPlaceholder + '"');
 
                                     requiresManualCount++;
                                     setTimeout(function () {
@@ -9477,17 +11600,17 @@ class RegistrationManager {
 
                               // Only execute this code if menuWrapper was found synchronously (not inside the nested setTimeout)
                               if (menuWrapper) {
-                                console.log('[Luma Auto Register] Found menu wrapper: ' + (menuWrapper.className || menuWrapper.getAttribute('role')));
+                                console.log('[Event Auto Register] Found menu wrapper: ' + (menuWrapper.className || menuWrapper.getAttribute('role')));
 
                                 // Debug: Log what's actually in the menu wrapper
                                 var allChildren = menuWrapper.querySelectorAll('*');
-                                console.log('[Luma Auto Register] Menu wrapper has ' + allChildren.length + ' child elements');
+                                console.log('[Event Auto Register] Menu wrapper has ' + allChildren.length + ' child elements');
                                 if (allChildren.length > 0 && allChildren.length < 50) {
-                                  console.log('[Luma Auto Register] First few child elements:');
+                                  console.log('[Event Auto Register] First few child elements:');
                                   for (var dbg = 0; dbg < Math.min(5, allChildren.length); dbg++) {
                                     var child = allChildren[dbg];
                                     var childText = (child.textContent || '').trim().substring(0, 50);
-                                    console.log('[Luma Auto Register]   - ' + child.tagName + ' (' + child.className + '): "' + childText + '"');
+                                    console.log('[Event Auto Register]   - ' + child.tagName + ' (' + child.className + '): "' + childText + '"');
                                   }
                                 }
 
@@ -9497,7 +11620,7 @@ class RegistrationManager {
                             }, 1200); // Increased to 1200ms for complex dropdowns that need time to render and for React to process
 
                           } catch (error) {
-                            console.log('[Luma Auto Register] ⚠️ Error with custom dropdown: ' + error);
+                            console.log('[Event Auto Register] ⚠️ Error with custom dropdown: ' + error);
                             requiresManualCount++;
                             // Continue with next dropdown
                             setTimeout(function () {
@@ -9517,7 +11640,7 @@ class RegistrationManager {
                       // Skip duplicate logical questions (same label) to avoid repeatedly
                       // opening the same "Which one are you?" dropdown several times.
                       if (labelKey && processedDropdownLabels[labelKey]) {
-                        console.log('[Luma Auto Register] Skipping duplicate custom dropdown for label: ' + labelKey);
+                        console.log('[Event Auto Register] Skipping duplicate custom dropdown for label: ' + labelKey);
                         processCustomDropdown(index + 1);
                         return;
                       }
@@ -9525,7 +11648,7 @@ class RegistrationManager {
                         processedDropdownLabels[labelKey] = true;
                       }
 
-                      console.log('[Luma Auto Register] Processing custom dropdown ' + (index + 1) + '/' + customDropdownsToProcess.length + ': ' + dropdownInfo.label + (isMultiSelect ? ' (multi-select)' : ''));
+                      console.log('[Event Auto Register] Processing custom dropdown ' + (index + 1) + '/' + customDropdownsToProcess.length + ': ' + dropdownInfo.label + (isMultiSelect ? ' (multi-select)' : ''));
 
                       try {
                         // Click to open dropdown - try clicking the input or its parent container
@@ -9538,7 +11661,7 @@ class RegistrationManager {
                         }
 
                         clickTarget.click();
-                        console.log('[Luma Auto Register] Clicked to open dropdown');
+                        console.log('[Event Auto Register] Clicked to open dropdown');
 
                         // Wait for dropdown menu to appear and find options
                         setTimeout(function() {
@@ -9552,27 +11675,115 @@ class RegistrationManager {
                           }
                           
                           if (visibleDirectOptions.length > 0) {
-                            console.log('[Luma Auto Register] Found ' + visibleDirectOptions.length + ' visible lux-menu-item options directly');
+                            console.log('[Event Auto Register] Found ' + visibleDirectOptions.length + ' visible lux-menu-item options directly');
                             
                             // Check if autoSelectFirstOption is enabled before selecting first option
                             if (settings.autoSelectFirstOption === false) {
-                              console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown without match');
+                              console.log('[Event Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown without match');
                               // Close the dropdown by clicking elsewhere
                               document.body.click();
                               setTimeout(function() {
                                 processCustomDropdown(index + 1);
-                              }, 300);
+                              }, 1000);
                               return;
                             }
                             
-                            // Click the first option
-                            var firstOpt = visibleDirectOptions[0];
-                            console.log('[Luma Auto Register] Clicking first option: "' + (firstOpt.textContent || '').trim().substring(0, 50) + '"');
-                            firstOpt.click();
+                            // Check if this looks like a sponsor/interest question
+                            // Check BOTH the label AND the options text for sponsor keywords
+                            var allOptTexts = visibleDirectOptions.map(function(o) { return (o.textContent || '').trim().toLowerCase(); });
+                            var optTextsJoined = allOptTexts.join(' ');
+                            var ddLabelLowerCheck = (dropdownInfo.label || '').toLowerCase();
+                            
+                            // Check options for sponsor indicators
+                            var hasOptionsIndicator = optTextsJoined.indexOf('discuss') > -1 || optTextsJoined.indexOf('contact') > -1 || optTextsJoined.indexOf('interested') > -1;
+                            
+                            // Check label for sponsor/donation keywords
+                            var hasLabelIndicator = 
+                              ddLabelLowerCheck.indexOf('sponsor') > -1 ||
+                              ddLabelLowerCheck.indexOf('donat') > -1 ||
+                              ddLabelLowerCheck.indexOf('contribut') > -1 ||
+                              ddLabelLowerCheck.indexOf('partnership') > -1 ||
+                              ddLabelLowerCheck.indexOf('exhibitor') > -1 ||
+                              ddLabelLowerCheck.indexOf('booth') > -1 ||
+                              (ddLabelLowerCheck.indexOf('interested') > -1 && (ddLabelLowerCheck.indexOf('brand') > -1 || ddLabelLowerCheck.indexOf('exposure') > -1 || ddLabelLowerCheck.indexOf('premium') > -1));
+                            
+                            var looksLikeSponsorQuestion = hasOptionsIndicator || hasLabelIndicator;
+                            
+                            var optToClick = visibleDirectOptions[0]; // default to first
+                            var ddLabelLower = (dropdownInfo.label || '').toLowerCase();
+                            
+                            // Try to match against user settings FIRST before defaulting to first option
+                            var settingsToMatch = [];
+                            
+                            // T-shirt size matching
+                            if (ddLabelLower.indexOf('shirt') > -1 || ddLabelLower.indexOf('t-shirt') > -1 || ddLabelLower.indexOf('tshirt') > -1) {
+                              if (settings.tshirtSize) {
+                                var tSize = settings.tshirtSize.trim();
+                                settingsToMatch.push(tSize.toLowerCase());
+                                settingsToMatch.push(tSize.toUpperCase());
+                                // Map sizes
+                                var szMap = {'S':['small'],'M':['medium'],'L':['large'],'XL':['extra large','x-large'],'XXL':['xx-large','2xl'],'XXXL':['xxx-large','3xl'],'XS':['extra small','x-small']};
+                                if (szMap[tSize.toUpperCase()]) {
+                                  for (var szi = 0; szi < szMap[tSize.toUpperCase()].length; szi++) {
+                                    settingsToMatch.push(szMap[tSize.toUpperCase()][szi]);
+                                  }
+                                }
+                              }
+                            }
+                            // Dietary restrictions
+                            if (ddLabelLower.indexOf('dietary') > -1 || ddLabelLower.indexOf('diet') > -1 || ddLabelLower.indexOf('food') > -1) {
+                              if (settings.dietaryRestrictions) settingsToMatch.push(settings.dietaryRestrictions.toLowerCase());
+                            }
+                            // Country
+                            if (ddLabelLower.indexOf('country') > -1) {
+                              if (settings.country) settingsToMatch.push(settings.country.toLowerCase());
+                            }
+                            // Role/title matching
+                            if (ddLabelLower.indexOf('role') > -1 || ddLabelLower.indexOf('position') > -1 || ddLabelLower.indexOf('title') > -1) {
+                              if (settings.title) settingsToMatch.push(settings.title.toLowerCase());
+                              if (settings.roleCategory) settingsToMatch.push(settings.roleCategory.toLowerCase());
+                            }
+                            
+                            // Try to find a matching option
+                            if (settingsToMatch.length > 0) {
+                              for (var smi = 0; smi < visibleDirectOptions.length; smi++) {
+                                var optTextMatch = (visibleDirectOptions[smi].textContent || '').trim().toLowerCase();
+                                for (var smj = 0; smj < settingsToMatch.length; smj++) {
+                                  if (optTextMatch === settingsToMatch[smj] || optTextMatch.indexOf(settingsToMatch[smj]) > -1 || settingsToMatch[smj].indexOf(optTextMatch) > -1) {
+                                    optToClick = visibleDirectOptions[smi];
+                                    console.log('[Event Auto Register] ✓ Matched option "' + optTextMatch + '" to setting "' + settingsToMatch[smj] + '"');
+                                    break;
+                                  }
+                                }
+                                if (optToClick !== visibleDirectOptions[0]) break;
+                              }
+                            }
+                            
+                            // If it looks like a sponsor question, prefer "No" option
+                            if (looksLikeSponsorQuestion) {
+                              console.log('[Event Auto Register] ⚠️ Detected possible sponsor/interest question - looking for "No" option');
+                              for (var soi = 0; soi < visibleDirectOptions.length; soi++) {
+                                var soText = (visibleDirectOptions[soi].textContent || '').trim().toLowerCase();
+                                // Match "No" and related variations
+                                var isSoNoOpt = soText === 'no' || soText === 'n/a' || soText === 'na' || soText === 'none' ||
+                                  soText === 'nope' || soText === 'neither' || soText === 'not yet' || soText === 'no thanks' ||
+                                  soText === 'not interested' || soText === 'do not have any' ||
+                                  soText.indexOf('no,') === 0 || soText.indexOf('no ') === 0 || soText.indexOf('not ') === 0 ||
+                                  soText.indexOf('decline') > -1 || soText.indexOf('prefer not') > -1 || soText.indexOf('n/a') > -1;
+                                if (isSoNoOpt) {
+                                  optToClick = visibleDirectOptions[soi];
+                                  console.log('[Event Auto Register] ✓ Found "No" option: "' + soText + '"');
+                                  break;
+                                }
+                              }
+                            }
+                            
+                            console.log('[Event Auto Register] Clicking option: "' + (optToClick.textContent || '').trim().substring(0, 50) + '"');
+                            optToClick.click();
                             // Move to next dropdown
                             setTimeout(function() {
                               processCustomDropdown(index + 1);
-                            }, 600);
+                            }, 1200);
                             return;
                           }
                           
@@ -9610,7 +11821,7 @@ class RegistrationManager {
                           }
 
                           if (!menuWrapper) {
-                            console.log('[Luma Auto Register] ⚠️ Could not find dropdown menu with selectors, trying to find options directly');
+                            console.log('[Event Auto Register] ⚠️ Could not find dropdown menu with selectors, trying to find options directly');
                             // Try to find visible options anywhere with role="option"
                             var allOptions = document.querySelectorAll('[role="option"]:not([aria-disabled="true"])');
                             var visibleOptions = [];
@@ -9621,11 +11832,11 @@ class RegistrationManager {
                             }
                             
                             if (visibleOptions.length > 0) {
-                              console.log('[Luma Auto Register] Found ' + visibleOptions.length + ' visible options with role="option"');
+                              console.log('[Event Auto Register] Found ' + visibleOptions.length + ' visible options with role="option"');
                               
                               // Check if autoSelectFirstOption is enabled
                               if (settings.autoSelectFirstOption === false) {
-                                console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
+                                console.log('[Event Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
                                 document.body.click();
                                 setTimeout(function() {
                                   processCustomDropdown(index + 1);
@@ -9633,10 +11844,32 @@ class RegistrationManager {
                                 return;
                               }
                               
-                              // Select the first option
-                              var firstOption = visibleOptions[0];
-                              console.log('[Luma Auto Register] Clicking first option: "' + (firstOption.textContent || '').trim() + '"');
-                              firstOption.click();
+                              // Check for sponsor/interest question patterns
+                              var voTexts = visibleOptions.map(function(o) { return (o.textContent || '').trim().toLowerCase(); });
+                              var voTextsJoined = voTexts.join(' ');
+                              var voLooksSponsor = voTextsJoined.indexOf('discuss') > -1 || voTextsJoined.indexOf('contact') > -1 || voTextsJoined.indexOf('interested') > -1;
+                              
+                              var optToSelect = visibleOptions[0];
+                              if (voLooksSponsor) {
+                                console.log('[Event Auto Register] ⚠️ Detected possible sponsor/interest question - looking for "No" option');
+                                for (var voi = 0; voi < visibleOptions.length; voi++) {
+                                  var voText = voTexts[voi];
+                                  // Match "No" and related variations
+                                  var isVoNoOpt = voText === 'no' || voText === 'n/a' || voText === 'na' || voText === 'none' ||
+                                    voText === 'nope' || voText === 'neither' || voText === 'not yet' || voText === 'no thanks' ||
+                                    voText === 'not interested' || voText === 'do not have any' ||
+                                    voText.indexOf('no,') === 0 || voText.indexOf('no ') === 0 || voText.indexOf('not ') === 0 ||
+                                    voText.indexOf('decline') > -1 || voText.indexOf('prefer not') > -1 || voText.indexOf('n/a') > -1;
+                                  if (isVoNoOpt) {
+                                    optToSelect = visibleOptions[voi];
+                                    console.log('[Event Auto Register] ✓ Found "No" option: "' + voText + '"');
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              console.log('[Event Auto Register] Clicking option: "' + (optToSelect.textContent || '').trim() + '"');
+                              optToSelect.click();
                               // Move to next dropdown after selection
                               setTimeout(function() {
                                 processCustomDropdown(index + 1);
@@ -9654,11 +11887,11 @@ class RegistrationManager {
                             }
                             
                             if (visibleLumaItems.length > 0) {
-                              console.log('[Luma Auto Register] Found ' + visibleLumaItems.length + ' visible Luma menu items');
+                              console.log('[Event Auto Register] Found ' + visibleLumaItems.length + ' visible Luma menu items');
                               
                               // Check if autoSelectFirstOption is enabled
                               if (settings.autoSelectFirstOption === false) {
-                                console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
+                                console.log('[Event Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
                                 document.body.click();
                                 setTimeout(function() {
                                   processCustomDropdown(index + 1);
@@ -9666,16 +11899,39 @@ class RegistrationManager {
                                 return;
                               }
                               
-                              var firstItem = visibleLumaItems[0];
-                              console.log('[Luma Auto Register] Clicking first item: "' + (firstItem.textContent || '').trim() + '"');
-                              firstItem.click();
+                              // Check for sponsor/interest question patterns
+                              var liTexts = visibleLumaItems.map(function(o) { return (o.textContent || '').trim().toLowerCase(); });
+                              var liTextsJoined = liTexts.join(' ');
+                              var liLooksSponsor = liTextsJoined.indexOf('discuss') > -1 || liTextsJoined.indexOf('contact') > -1 || liTextsJoined.indexOf('interested') > -1;
+                              
+                              var itemToClick = visibleLumaItems[0];
+                              if (liLooksSponsor) {
+                                console.log('[Event Auto Register] ⚠️ Detected possible sponsor/interest question - looking for "No" option');
+                                for (var lii = 0; lii < visibleLumaItems.length; lii++) {
+                                  var liText = liTexts[lii];
+                                  // Match "No" and related variations
+                                  var isLiNoOpt = liText === 'no' || liText === 'n/a' || liText === 'na' || liText === 'none' ||
+                                    liText === 'nope' || liText === 'neither' || liText === 'not yet' || liText === 'no thanks' ||
+                                    liText === 'not interested' || liText === 'do not have any' ||
+                                    liText.indexOf('no,') === 0 || liText.indexOf('no ') === 0 || liText.indexOf('not ') === 0 ||
+                                    liText.indexOf('decline') > -1 || liText.indexOf('prefer not') > -1 || liText.indexOf('n/a') > -1;
+                                  if (isLiNoOpt) {
+                                    itemToClick = visibleLumaItems[lii];
+                                    console.log('[Event Auto Register] ✓ Found "No" option: "' + liText + '"');
+                                    break;
+                                  }
+                                }
+                              }
+                              
+                              console.log('[Event Auto Register] Clicking item: "' + (itemToClick.textContent || '').trim() + '"');
+                              itemToClick.click();
                               setTimeout(function() {
                                 processCustomDropdown(index + 1);
                               }, 600);
                               return;
                             }
                             
-                            console.log('[Luma Auto Register] No dropdown options found, moving to next');
+                            console.log('[Event Auto Register] No dropdown options found, moving to next');
                             // Move to next dropdown
                             setTimeout(function() {
                               processCustomDropdown(index + 1);
@@ -9683,7 +11939,7 @@ class RegistrationManager {
                             return;
                           }
 
-                          console.log('[Luma Auto Register] Found dropdown menu: ' + menuWrapper.className);
+                          console.log('[Event Auto Register] Found dropdown menu: ' + menuWrapper.className);
 
                           // Find options
                           var options = menuWrapper.querySelectorAll('[role="option"]:not([aria-disabled="true"])');
@@ -9694,17 +11950,17 @@ class RegistrationManager {
                             options = menuWrapper.querySelectorAll('div[class*="item"], li, button');
                           }
 
-                          console.log('[Luma Auto Register] Found ' + options.length + ' options');
+                          console.log('[Event Auto Register] Found ' + options.length + ' options');
 
                           if (options.length > 0) {
                             // Check if autoSelectFirstOption is enabled
                             if (settings.autoSelectFirstOption === false) {
-                              console.log('[Luma Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
+                              console.log('[Event Auto Register] ⚠️ autoSelectFirstOption is DISABLED - skipping dropdown');
                               document.body.click(); // Close the dropdown
                             } else {
                               // For single-select, just click the first option
                               var firstOption = options[0];
-                              console.log('[Luma Auto Register] Clicking option: "' + (firstOption.textContent || '').trim() + '"');
+                              console.log('[Event Auto Register] Clicking option: "' + (firstOption.textContent || '').trim() + '"');
                               firstOption.click();
                             }
                           }
@@ -9715,7 +11971,7 @@ class RegistrationManager {
                           }, 600);
                         }, 500);
                       } catch (error) {
-                        console.log('[Luma Auto Register] ⚠️ Error processing dropdown: ' + error);
+                        console.log('[Event Auto Register] ⚠️ Error processing dropdown: ' + error);
                         // Continue with next dropdown
                         setTimeout(function() {
                           processCustomDropdown(index + 1);
@@ -9732,8 +11988,8 @@ class RegistrationManager {
                 // END
 
                 // Handle all required checkboxes
-                console.log('[Luma Auto Register] === CHECKING REQUIRED CHECKBOXES ===');
-                console.log('[Luma Auto Register] Found ' + requiredCheckboxes.length + ' required checkboxes (excluding terms)');
+                console.log('[Event Auto Register] === CHECKING REQUIRED CHECKBOXES ===');
+                console.log('[Event Auto Register] Found ' + requiredCheckboxes.length + ' required checkboxes (excluding terms)');
 
                 // NOTE: Terms checkbox will be checked AFTER all dropdowns are processed
                 // This prevents interference with dropdown interactions
@@ -9742,7 +11998,7 @@ class RegistrationManager {
                 // This check should still run even if we're not auto-checking the checkbox
                 if (termsCheckbox) {
                   setTimeout(function () {
-                    console.log('[Luma Auto Register] === CHECKING FOR TERMS MODAL ===');
+                    console.log('[Event Auto Register] === CHECKING FOR TERMS MODAL ===');
 
                     // Look for "Accept Terms" modal
                     var termsModal = null;
@@ -9776,7 +12032,7 @@ class RegistrationManager {
 
                         if ((hasSignAndAccept || hasSignAcceptButton) && !isMainForm) {
                           termsModal = modal;
-                          console.log('[Luma Auto Register] Found terms acceptance modal (not main form)');
+                          console.log('[Event Auto Register] Found terms acceptance modal (not main form)');
                           break;
                         }
                       }
@@ -9785,13 +12041,13 @@ class RegistrationManager {
 
                     // Check if we've already handled this modal
                     if (typeof window !== 'undefined' && window.__lumaTermsModalHandled) {
-                      console.log('[Luma Auto Register] Terms modal already handled, skipping duplicate check...');
+                      console.log('[Event Auto Register] Terms modal already handled, skipping duplicate check...');
                       return;
                     }
 
                     if (termsModal) {
-                      console.log('[Luma Auto Register] === PROCESSING TERMS MODAL ===');
-                      console.log('[Luma Auto Register] Modal HTML sample: ' + (termsModal.innerHTML || '').substring(0, 200));
+                      console.log('[Event Auto Register] === PROCESSING TERMS MODAL ===');
+                      console.log('[Event Auto Register] Modal HTML sample: ' + (termsModal.innerHTML || '').substring(0, 200));
 
                       // Mark that we're handling it to prevent duplicates
                       if (typeof window !== 'undefined') {
@@ -9803,7 +12059,7 @@ class RegistrationManager {
 
                       // First, log ALL inputs found in modal for debugging
                       var allInputs = termsModal.querySelectorAll('input, textarea, [contenteditable="true"]');
-                      console.log('[Luma Auto Register] Found ' + allInputs.length + ' total input/textarea/contenteditable elements in modal');
+                      console.log('[Event Auto Register] Found ' + allInputs.length + ' total input/textarea/contenteditable elements in modal');
 
                       // Strategy 1: Look for input with placeholder containing "name" (case insensitive)
                       for (var ni = 0; ni < allInputs.length; ni++) {
@@ -9815,7 +12071,7 @@ class RegistrationManager {
                         var className = (inp.className || '').toLowerCase();
                         var contentEditable = inp.contentEditable === 'true';
 
-                        console.log('[Luma Auto Register]   Checking input ' + ni + ': type="' + type + '", placeholder="' + placeholder + '", name="' + name + '", id="' + id + '", contentEditable=' + contentEditable);
+                        console.log('[Event Auto Register]   Checking input ' + ni + ': type="' + type + '", placeholder="' + placeholder + '", name="' + name + '", id="' + id + '", contentEditable=' + contentEditable);
 
                         // Check if it's a text input, textarea, or contentEditable (not hidden, submit, button, etc.)
                         var isTextarea = inp.tagName === 'TEXTAREA';
@@ -9839,7 +12095,7 @@ class RegistrationManager {
                             id.indexOf('last') > -1;
 
                           if (isRegularNameField) {
-                            console.log('[Luma Auto Register]   Skipping regular name field (first/last name): ' + (placeholder || name || id));
+                            console.log('[Event Auto Register]   Skipping regular name field (first/last name): ' + (placeholder || name || id));
                             continue; // Skip regular form fields
                           }
 
@@ -9858,7 +12114,7 @@ class RegistrationManager {
 
                           if (isSignatureField) {
                             nameInput = inp;
-                            console.log('[Luma Auto Register] ✓ Found signature name input (not regular form field): ' + (placeholder || name || id || className) + ' (tagName: ' + inp.tagName + ')');
+                            console.log('[Event Auto Register] ✓ Found signature name input (not regular form field): ' + (placeholder || name || id || className) + ' (tagName: ' + inp.tagName + ')');
                             break;
                           }
                         }
@@ -9867,7 +12123,7 @@ class RegistrationManager {
                       // Strategy 2: If no specific match, find first visible text input, textarea, or contentEditable
                       // BUT skip regular form fields (first name, last name, etc.)
                       if (!nameInput) {
-                        console.log('[Luma Auto Register] No specific match found, looking for first visible text input/textarea (excluding regular form fields)...');
+                        console.log('[Event Auto Register] No specific match found, looking for first visible text input/textarea (excluding regular form fields)...');
                         for (var ni2 = 0; ni2 < allInputs.length; ni2++) {
                           var inp2 = allInputs[ni2];
                           var type2 = (inp2.type || '').toLowerCase();
@@ -9889,7 +12145,7 @@ class RegistrationManager {
                             id2.indexOf('last') > -1;
 
                           if (isRegularNameField2) {
-                            console.log('[Luma Auto Register]   Skipping regular name field in Strategy 2: ' + (placeholder2 || name2 || id2));
+                            console.log('[Event Auto Register]   Skipping regular name field in Strategy 2: ' + (placeholder2 || name2 || id2));
                             continue;
                           }
 
@@ -9898,7 +12154,7 @@ class RegistrationManager {
                             !inp2.disabled &&
                             inp2.style.display !== 'none') {
                             nameInput = inp2;
-                            console.log('[Luma Auto Register] ✓ Found name input (first visible text input/textarea/contentEditable, tagName: ' + inp2.tagName + ')');
+                            console.log('[Event Auto Register] ✓ Found name input (first visible text input/textarea/contentEditable, tagName: ' + inp2.tagName + ')');
                             break;
                           }
                         }
@@ -9908,7 +12164,7 @@ class RegistrationManager {
                       if (!nameInput) {
                         nameInput = termsModal.querySelector('input[class*="name"], input[class*="Name"], input[data-name], input[aria-label*="name" i], [contenteditable="true"]');
                         if (nameInput) {
-                          console.log('[Luma Auto Register] ✓ Found name input by class/attribute/contentEditable');
+                          console.log('[Event Auto Register] ✓ Found name input by class/attribute/contentEditable');
                         }
                       }
 
@@ -9933,8 +12189,8 @@ class RegistrationManager {
                         }
 
                         if (fullName) {
-                          console.log('[Luma Auto Register] Filling name in terms modal: "' + fullName + '"');
-                          console.log('[Luma Auto Register] Name input found! TagName: ' + nameInput.tagName + ', Type: ' + (nameInput.type || 'N/A') + ', Placeholder: "' + (nameInput.placeholder || '') + '", contentEditable: ' + (nameInput.contentEditable || 'false'));
+                          console.log('[Event Auto Register] Filling name in terms modal: "' + fullName + '"');
+                          console.log('[Event Auto Register] Name input found! TagName: ' + nameInput.tagName + ', Type: ' + (nameInput.type || 'N/A') + ', Placeholder: "' + (nameInput.placeholder || '') + '", contentEditable: ' + (nameInput.contentEditable || 'false'));
 
                           // Focus the input first
                           nameInput.focus();
@@ -9945,7 +12201,7 @@ class RegistrationManager {
                             try {
                               nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
                             } catch (e) {
-                              console.log('[Luma Auto Register] Could not get native value setter: ' + e.message);
+                              console.log('[Event Auto Register] Could not get native value setter: ' + e.message);
                             }
                           }
 
@@ -9961,7 +12217,7 @@ class RegistrationManager {
                           }
 
                           // Type the name character by character to simulate human typing (prevents bot detection)
-                          console.log('[Luma Auto Register] Typing name character by character...');
+                          console.log('[Event Auto Register] Typing name character by character...');
 
                           // Store reference to modal for later use
                           var modalRef = termsModal;
@@ -9974,12 +12230,12 @@ class RegistrationManager {
 
                               // Get current value to verify
                               var currentValue = nameInput.contentEditable === 'true' ? (nameInput.textContent || nameInput.innerText) : nameInput.value;
-                              console.log('[Luma Auto Register] ✓ Finished typing name (typed ' + fullName.length + ' characters)');
-                              console.log('[Luma Auto Register] Current input value: "' + currentValue + '"');
+                              console.log('[Event Auto Register] ✓ Finished typing name (typed ' + fullName.length + ' characters)');
+                              console.log('[Event Auto Register] Current input value: "' + currentValue + '"');
 
                               // If value doesn't match, try to set it directly using React-compatible method
                               if (currentValue !== fullName && nameInput.contentEditable !== 'true') {
-                                console.log('[Luma Auto Register] Value mismatch detected, setting directly with React-compatible method...');
+                                console.log('[Event Auto Register] Value mismatch detected, setting directly with React-compatible method...');
                                 if (nativeInputValueSetter) {
                                   nativeInputValueSetter.call(nameInput, fullName);
                                 } else {
@@ -10003,10 +12259,10 @@ class RegistrationManager {
                                         defaultPrevented: false
                                       };
                                       onChange(syntheticEvent);
-                                      console.log('[Luma Auto Register] Triggered React onChange handler');
+                                      console.log('[Event Auto Register] Triggered React onChange handler');
                                     }
                                   } catch (e) {
-                                    console.log('[Luma Auto Register] Could not trigger React handler: ' + e.message);
+                                    console.log('[Event Auto Register] Could not trigger React handler: ' + e.message);
                                   }
                                 }
                               }
@@ -10025,9 +12281,9 @@ class RegistrationManager {
                               // Verify one more time after events
                               setTimeout(function () {
                                 var finalValue = nameInput.contentEditable === 'true' ? (nameInput.textContent || nameInput.innerText) : nameInput.value;
-                                console.log('[Luma Auto Register] Final input value after events: "' + finalValue + '"');
+                                console.log('[Event Auto Register] Final input value after events: "' + finalValue + '"');
                                 if (finalValue !== fullName && finalValue.length < fullName.length) {
-                                  console.log('[Luma Auto Register] ⚠️ Value still not set correctly, attempting direct set...');
+                                  console.log('[Event Auto Register] ⚠️ Value still not set correctly, attempting direct set...');
                                   if (nameInput.contentEditable !== 'true' && nativeInputValueSetter) {
                                     nativeInputValueSetter.call(nameInput, fullName);
                                     nameInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -10045,7 +12301,7 @@ class RegistrationManager {
                                 setTimeout(function () {
                                   // Double-check typing is complete
                                   if (!typingComplete) {
-                                    console.log('[Luma Auto Register] ⚠️ Typing not complete yet, waiting...');
+                                    console.log('[Event Auto Register] ⚠️ Typing not complete yet, waiting...');
                                     setTimeout(arguments.callee, 200);
                                     return;
                                   }
@@ -10080,36 +12336,36 @@ class RegistrationManager {
                                   }
 
                                   if (!currentModal || !currentModal.offsetParent) {
-                                    console.log('[Luma Auto Register] ⚠️ Terms modal no longer visible, may have closed');
+                                    console.log('[Event Auto Register] ⚠️ Terms modal no longer visible, may have closed');
                                     return;
                                   }
 
                                   var signButtons = currentModal.querySelectorAll('button, input[type="submit"]');
                                   var signBtn = null;
 
-                                  console.log('[Luma Auto Register] Looking for "Sign & Accept" button, found ' + signButtons.length + ' buttons in modal');
+                                  console.log('[Event Auto Register] Looking for "Sign & Accept" button, found ' + signButtons.length + ' buttons in modal');
 
                                   for (var sb = 0; sb < signButtons.length; sb++) {
                                     var btn = signButtons[sb];
                                     var btnText = (btn.textContent || '').toLowerCase();
-                                    console.log('[Luma Auto Register] Checking button ' + sb + ': "' + btnText + '"');
+                                    console.log('[Event Auto Register] Checking button ' + sb + ': "' + btnText + '"');
                                     if (btnText.indexOf('sign') > -1 && btnText.indexOf('accept') > -1 ||
                                       btnText.indexOf('accept') > -1 && btnText.indexOf('sign') > -1 ||
                                       btnText === 'sign & accept' ||
                                       btnText === 'sign and accept') {
                                       signBtn = btn;
-                                      console.log('[Luma Auto Register] Found "Sign & Accept" button');
+                                      console.log('[Event Auto Register] Found "Sign & Accept" button');
                                       break;
                                     }
                                   }
 
                                   if (signBtn && !signBtn.disabled && signBtn.offsetParent) {
-                                    console.log('[Luma Auto Register] Clicking "Sign & Accept" button (after typing complete)');
+                                    console.log('[Event Auto Register] Clicking "Sign & Accept" button (after typing complete)');
                                     signBtn.click();
                                     signBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                     signBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
                                     signBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                                    console.log('[Luma Auto Register] ✓ Terms modal signed and accepted');
+                                    console.log('[Event Auto Register] ✓ Terms modal signed and accepted');
 
                                     // Mark that we've handled the terms modal to prevent duplicate handling
                                     if (typeof window !== 'undefined') {
@@ -10120,7 +12376,7 @@ class RegistrationManager {
                                     var checkModalClosed = function (attempts) {
                                       attempts = attempts || 0;
                                       if (attempts > 20) { // Max 4 seconds (20 * 200ms)
-                                        console.log('[Luma Auto Register] ⚠️ Terms modal did not close after 4 seconds, continuing anyway...');
+                                        console.log('[Event Auto Register] ⚠️ Terms modal did not close after 4 seconds, continuing anyway...');
                                         return;
                                       }
 
@@ -10148,12 +12404,12 @@ class RegistrationManager {
                                       }
 
                                       if (modalStillOpen) {
-                                        console.log('[Luma Auto Register] Terms modal still open, waiting... (attempt ' + (attempts + 1) + ')');
+                                        console.log('[Event Auto Register] Terms modal still open, waiting... (attempt ' + (attempts + 1) + ')');
                                         setTimeout(function () {
                                           checkModalClosed(attempts + 1);
                                         }, 200);
                                       } else {
-                                        console.log('[Luma Auto Register] ✓ Terms modal closed, continuing with registration...');
+                                        console.log('[Event Auto Register] ✓ Terms modal closed, continuing with registration...');
                                       }
                                     };
 
@@ -10162,7 +12418,7 @@ class RegistrationManager {
                                       checkModalClosed(0);
                                     }, 300);
                                   } else {
-                                    console.log('[Luma Auto Register] ⚠️ Could not find or click "Sign & Accept" button (disabled: ' + (signBtn ? signBtn.disabled : 'null') + ', visible: ' + (signBtn ? (signBtn.offsetParent !== null) : 'null') + ')');
+                                    console.log('[Event Auto Register] ⚠️ Could not find or click "Sign & Accept" button (disabled: ' + (signBtn ? signBtn.disabled : 'null') + ', visible: ' + (signBtn ? (signBtn.offsetParent !== null) : 'null') + ')');
                                   }
                                 }, 500); // Increased delay to 500ms to ensure typing is fully processed
                               }, 200); // Increased blur delay to 200ms
@@ -10205,25 +12461,25 @@ class RegistrationManager {
                             }, delay);
                           })(0);
                         } else {
-                          console.log('[Luma Auto Register] ⚠️ No name available to fill in terms modal');
+                          console.log('[Event Auto Register] ⚠️ No name available to fill in terms modal');
                         }
                       } else {
-                        console.log('[Luma Auto Register] ⚠️ Could not find name input in terms modal');
+                        console.log('[Event Auto Register] ⚠️ Could not find name input in terms modal');
                         // Debug: log all inputs in modal
                         var allInputsDebug = termsModal.querySelectorAll('input, textarea');
-                        console.log('[Luma Auto Register] Found ' + allInputsDebug.length + ' input/textarea elements in modal:');
+                        console.log('[Event Auto Register] Found ' + allInputsDebug.length + ' input/textarea elements in modal:');
                         for (var di = 0; di < allInputsDebug.length; di++) {
                           var inp = allInputsDebug[di];
-                          console.log('[Luma Auto Register]   Input ' + di + ': type="' + (inp.type || 'text') + '", placeholder="' + (inp.placeholder || '') + '", name="' + (inp.name || '') + '", id="' + (inp.id || '') + '", visible=' + (inp.offsetParent !== null));
+                          console.log('[Event Auto Register]   Input ' + di + ': type="' + (inp.type || 'text') + '", placeholder="' + (inp.placeholder || '') + '", name="' + (inp.name || '') + '", id="' + (inp.id || '') + '", visible=' + (inp.offsetParent !== null));
                         }
                       }
                     } else {
-                      console.log('[Luma Auto Register] No terms modal found');
+                      console.log('[Event Auto Register] No terms modal found');
                       
                       // FALLBACK: Click the regular terms checkbox if it exists and hasn't been clicked
                       // This handles cases where dropdown processing didn't complete properly
                       if (termsCheckbox && !termsCheckbox.checked) {
-                        console.log('[Luma Auto Register] === FALLBACK: Checking terms checkbox (no modal) ===');
+                        console.log('[Event Auto Register] === FALLBACK: Checking terms checkbox (no modal) ===');
                         
                         // Check if it's required or autoAcceptTerms is enabled
                         var isRequired = false;
@@ -10238,21 +12494,21 @@ class RegistrationManager {
                         }
                         
                         if (isRequired || settings.autoAcceptTerms) {
-                          console.log('[Luma Auto Register] Clicking terms checkbox via fallback mechanism');
+                          console.log('[Event Auto Register] Clicking terms checkbox via fallback mechanism');
                           reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (fallback)');
                           
                           // Verify it stays checked
                           setTimeout(function () {
                             if (termsCheckbox && !termsCheckbox.checked) {
-                              console.log('[Luma Auto Register] ⚠️ Terms checkbox unchecked, re-clicking...');
+                              console.log('[Event Auto Register] ⚠️ Terms checkbox unchecked, re-clicking...');
                               reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (fallback retry)');
                             } else {
-                              console.log('[Luma Auto Register] ✓ Terms checkbox confirmed checked (fallback)');
+                              console.log('[Event Auto Register] ✓ Terms checkbox confirmed checked (fallback)');
                             }
                           }, 500);
                         }
                       } else if (termsCheckbox && termsCheckbox.checked) {
-                        console.log('[Luma Auto Register] ✓ Terms checkbox already checked');
+                        console.log('[Event Auto Register] ✓ Terms checkbox already checked');
                       }
                     }
                   }, 1000); // Wait 1 second for modal to appear
@@ -10260,7 +12516,7 @@ class RegistrationManager {
                   // ADDITIONAL FALLBACK: Check again after 3 seconds in case earlier attempts failed
                   setTimeout(function () {
                     if (termsCheckbox && !termsCheckbox.checked) {
-                      console.log('[Luma Auto Register] === LATE FALLBACK: Terms checkbox still unchecked after 3s ===');
+                      console.log('[Event Auto Register] === LATE FALLBACK: Terms checkbox still unchecked after 3s ===');
                       
                       var isRequired = false;
                       var termsLabelEl = termsCheckbox.closest('label') ||
@@ -10274,7 +12530,7 @@ class RegistrationManager {
                       }
                       
                       if (isRequired || settings.autoAcceptTerms) {
-                        console.log('[Luma Auto Register] Clicking terms checkbox via late fallback');
+                        console.log('[Event Auto Register] Clicking terms checkbox via late fallback');
                         reliablyCheckCheckbox(termsCheckbox, 'terms checkbox (late fallback)');
                       }
                     }
@@ -10286,20 +12542,20 @@ class RegistrationManager {
                 for (var cb = 0; cb < requiredCheckboxes.length; cb++) {
                   var checkbox = requiredCheckboxes[cb];
                   if (!checkbox.input.checked) {
-                    console.log('[Luma Auto Register] Checking required checkbox: ' + checkbox.description);
+                    console.log('[Event Auto Register] Checking required checkbox: ' + checkbox.description);
                     reliablyCheckCheckbox(checkbox.input, checkbox.description || 'required checkbox');
 
                     // Verify it's still checked after a brief delay (in case something unchecks it)
                     setTimeout(function (cbInput, cbDesc) {
                       return function () {
                         if (!cbInput.checked) {
-                          console.log('[Luma Auto Register] ⚠️ Required checkbox was unchecked, re-checking: ' + cbDesc);
+                          console.log('[Event Auto Register] ⚠️ Required checkbox was unchecked, re-checking: ' + cbDesc);
                           reliablyCheckCheckbox(cbInput, cbDesc || 'required checkbox');
                         }
                       };
                     }(checkbox.input, checkbox.description), 200);
                   } else {
-                    console.log('[Luma Auto Register] ✓ Already checked: ' + checkbox.description);
+                    console.log('[Event Auto Register] ✓ Already checked: ' + checkbox.description);
                   }
                 }
 
@@ -10337,16 +12593,16 @@ class RegistrationManager {
 
                   if (termsModalOpen && attempts < 30) {
                     // Modal still open, wait a bit more
-                    console.log('[Luma Auto Register] Terms modal still open, waiting before looking for submit button... (attempt ' + (attempts + 1) + ')');
+                    console.log('[Event Auto Register] Terms modal still open, waiting before looking for submit button... (attempt ' + (attempts + 1) + ')');
                     setTimeout(function () {
                       checkForTermsModalAndWait(callback, attempts + 1);
                     }, 200);
                   } else {
                     // Modal closed or max attempts reached, proceed
                     if (termsModalOpen) {
-                      console.log('[Luma Auto Register] ⚠️ Terms modal still open after 6 seconds, proceeding anyway...');
+                      console.log('[Event Auto Register] ⚠️ Terms modal still open after 6 seconds, proceeding anyway...');
                     } else {
-                      console.log('[Luma Auto Register] Terms modal closed, proceeding to submit button search...');
+                      console.log('[Event Auto Register] Terms modal closed, proceeding to submit button search...');
                     }
                     callback();
                   }
@@ -10389,7 +12645,7 @@ class RegistrationManager {
                         labelText.indexOf('email') > -1;
 
                       if (isRequired && isFieldWeFilled && !fieldValue) {
-                        console.log('[Luma Auto Register] ⚠️ Field was cleared by React: ' + (labelText || fieldName || fieldPlaceholder));
+                        console.log('[Event Auto Register] ⚠️ Field was cleared by React: ' + (labelText || fieldName || fieldPlaceholder));
                         fieldsStillFilled = false;
                         // Re-fill the field
                         if (fieldName.indexOf('email') > -1 || fieldPlaceholder.indexOf('email') > -1 || labelText.indexOf('email') > -1) {
@@ -10397,7 +12653,7 @@ class RegistrationManager {
                             fieldToVerify.value = settings.email;
                             fieldToVerify.dispatchEvent(new Event('input', { bubbles: true }));
                             fieldToVerify.dispatchEvent(new Event('change', { bubbles: true }));
-                            console.log('[Luma Auto Register] ✓ Re-filled email field');
+                            console.log('[Event Auto Register] ✓ Re-filled email field');
                           }
                         } else if (fieldName.indexOf('name') > -1 || fieldPlaceholder.indexOf('name') > -1 || labelText.indexOf('name') > -1) {
                           var fullName = '';
@@ -10412,14 +12668,14 @@ class RegistrationManager {
                             fieldToVerify.value = fullName;
                             fieldToVerify.dispatchEvent(new Event('input', { bubbles: true }));
                             fieldToVerify.dispatchEvent(new Event('change', { bubbles: true }));
-                            console.log('[Luma Auto Register] ✓ Re-filled name field');
+                            console.log('[Event Auto Register] ✓ Re-filled name field');
                           }
                         }
                       }
                     }
 
                     if (!fieldsStillFilled) {
-                      console.log('[Luma Auto Register] Some fields were cleared, waiting additional 500ms for React to process re-filled values...');
+                      console.log('[Event Auto Register] Some fields were cleared, waiting additional 500ms for React to process re-filled values...');
                       setTimeout(function () {
                         proceedToSubmitButtonSearch();
                       }, 500);
@@ -10443,24 +12699,24 @@ class RegistrationManager {
                         }
 
                         if (isRequired || settings.autoAcceptTerms) {
-                          console.log('[Luma Auto Register] === ACCEPTING TERMS (no dropdowns) ===');
+                          console.log('[Event Auto Register] === ACCEPTING TERMS (no dropdowns) ===');
                           if (!termsCheckbox.checked) {
-                            console.log('[Luma Auto Register] Checking terms checkbox via helper (no dropdowns immediate path)');
+                            console.log('[Event Auto Register] Checking terms checkbox via helper (no dropdowns immediate path)');
                             reliablyCheckCheckbox(termsCheckbox, 'terms checkbox');
                           } else {
-                            console.log('[Luma Auto Register] ✓ Terms checkbox already checked');
+                            console.log('[Event Auto Register] ✓ Terms checkbox already checked');
                           }
                         }
                       }
 
                       checkForTermsModalAndWait(function () {
-                        console.log('[Luma Auto Register] === LOOKING FOR SUBMIT BUTTON ===');
+                        console.log('[Event Auto Register] === LOOKING FOR SUBMIT BUTTON ===');
 
                         // First try to find buttons in modals/dialogs (they're usually the submit buttons we want)
                         var modalButtons = document.querySelectorAll('[role="dialog"] button, .modal button, [class*="modal"] button');
                         var allButtons = document.querySelectorAll('button, input[type="submit"], a[role="button"]');
 
-                        console.log('[Luma Auto Register] Found ' + modalButtons.length + ' modal buttons, ' + allButtons.length + ' total buttons');
+                        console.log('[Event Auto Register] Found ' + modalButtons.length + ' modal buttons, ' + allButtons.length + ' total buttons');
 
                         var submitBtn = null;
                         var submitKeywords = ['request to join', 'submit', 'register', 'confirm', 'rsvp', 'join', 'continue', 'next', 'send'];
@@ -10477,7 +12733,7 @@ class RegistrationManager {
                           // Combine all text sources
                           var allText = text + ' ' + ariaLabel + ' ' + title;
 
-                          console.log('[Luma Auto Register] ' + source + ' Button ' + index + ': "' + text + '"' +
+                          console.log('[Event Auto Register] ' + source + ' Button ' + index + ': "' + text + '"' +
                             ' aria="' + ariaLabel + '" title="' + title + '"' + disabled + visible + ' (type: ' + type + ')');
 
                           // Check if button text/label contains any submit keywords
@@ -10487,13 +12743,13 @@ class RegistrationManager {
                               if (btn.offsetParent !== null && !btn.disabled) {
                                 // Prefer buttons with actual text over empty buttons
                                 if (text.length > 0 || ariaLabel.length > 0 || type === 'submit') {
-                                  console.log('[Luma Auto Register] ✓✓✓ MATCHED KEYWORD: "' + submitKeywords[k] + '" or type=submit');
+                                  console.log('[Event Auto Register] ✓✓✓ MATCHED KEYWORD: "' + submitKeywords[k] + '" or type=submit');
                                   return btn;
                                 }
                               } else if (btn.disabled) {
-                                console.log('[Luma Auto Register] ⚠️ Matched but disabled: "' + (text || ariaLabel || type) + '"');
+                                console.log('[Event Auto Register] ⚠️ Matched but disabled: "' + (text || ariaLabel || type) + '"');
                               } else {
-                                console.log('[Luma Auto Register] ⚠️ Matched but hidden: "' + (text || ariaLabel || type) + '"');
+                                console.log('[Event Auto Register] ⚠️ Matched but hidden: "' + (text || ariaLabel || type) + '"');
                               }
                             }
                           }
@@ -10501,7 +12757,7 @@ class RegistrationManager {
                         }
 
                         // First check modal buttons (highest priority)
-                        console.log('[Luma Auto Register] Checking modal buttons first...');
+                        console.log('[Event Auto Register] Checking modal buttons first...');
                         var bestButton = null;
                         var bestButtonScore = 0; // Prefer buttons with text over empty ones
 
@@ -10517,7 +12773,7 @@ class RegistrationManager {
                             if (score > bestButtonScore) {
                               bestButton = found;
                               bestButtonScore = score;
-                              console.log('[Luma Auto Register] New best button with score: ' + score);
+                              console.log('[Event Auto Register] New best button with score: ' + score);
                             }
                           }
                         }
@@ -10526,7 +12782,7 @@ class RegistrationManager {
 
                         // If not found in modal, check all buttons
                         if (!submitBtn) {
-                          console.log('[Luma Auto Register] No modal button found, checking all buttons...');
+                          console.log('[Event Auto Register] No modal button found, checking all buttons...');
                           for (var i = 0; i < allButtons.length; i++) {
                             var found = checkButton(allButtons[i], i, 'ALL');
                             if (found) {
@@ -10537,8 +12793,8 @@ class RegistrationManager {
                         }
 
                         if (!submitBtn) {
-                          console.log('[Luma Auto Register] ✗✗✗ NO SUBMIT BUTTON FOUND');
-                          console.log('[Luma Auto Register] This might be a one-click registration, checking status...');
+                          console.log('[Event Auto Register] ✗✗✗ NO SUBMIT BUTTON FOUND');
+                          console.log('[Event Auto Register] This might be a one-click registration, checking status...');
 
                           // Check if auto-registered
                           setTimeout(function () {
@@ -10554,13 +12810,13 @@ class RegistrationManager {
                               bodyTextLower.indexOf("thanks for joining") > -1;
 
                             if (success) {
-                              console.log('[Luma Auto Register] ✓ Auto-registered successfully!');
+                              console.log('[Event Auto Register] ✓ Auto-registered successfully!');
                               resolve({
                                 success: true,
                                 message: 'Registered successfully (one-click)'
                               });
                             } else {
-                              console.log('[Luma Auto Register] ✗ No submit button and not auto-registered');
+                              console.log('[Event Auto Register] ✗ No submit button and not auto-registered');
                               resolve({
                                 success: false,
                                 message: 'Could not find submit button - please register manually'
@@ -10571,16 +12827,16 @@ class RegistrationManager {
                         }
 
                         // FOUND THE SUBMIT BUTTON!
-                        console.log('[Luma Auto Register] ✓✓✓ FOUND SUBMIT BUTTON: "' + submitBtn.textContent.trim() + '"');
-                        console.log('[Luma Auto Register] Button disabled status: ' + submitBtn.disabled);
+                        console.log('[Event Auto Register] ✓✓✓ FOUND SUBMIT BUTTON: "' + submitBtn.textContent.trim() + '"');
+                        console.log('[Event Auto Register] Button disabled status: ' + submitBtn.disabled);
 
                         // Check if button is disabled - if so, wait a bit for it to enable
                         if (submitBtn.disabled) {
-                          console.log('[Luma Auto Register] Button IS disabled, entering disabled handler...');
-                          console.log('[Luma Auto Register] ⚠️ Button is disabled, waiting 1.5 seconds for validation...');
+                          console.log('[Event Auto Register] Button IS disabled, entering disabled handler...');
+                          console.log('[Event Auto Register] ⚠️ Button is disabled, waiting 1.5 seconds for validation...');
                           setTimeout(function () {
                             if (submitBtn.disabled) {
-                              console.log('[Luma Auto Register] ✗ Button still disabled after waiting');
+                              console.log('[Event Auto Register] ✗ Button still disabled after waiting');
                               resolve({
                                 success: false,
                                 message: 'Submit button disabled - form validation may have failed'
@@ -10597,7 +12853,7 @@ class RegistrationManager {
                                 if (submitText2.indexOf('request to join') > -1 ||
                                   submitText2.indexOf('submit') > -1 ||
                                   submitText2.indexOf('register') > -1) {
-                                  console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
+                                  console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
                                   submitBtn2.click();
                                   submitBtn2.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                   submitBtn2.dispatchEvent(new Event('submit', { bubbles: true }));
@@ -10608,21 +12864,21 @@ class RegistrationManager {
                             }
 
                             // Button is now enabled, click it!
-                            console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON ===');
-                            console.log('[Luma Auto Register] Button text: "' + submitBtn.textContent + '"');
-                            console.log('[Luma Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
-                            console.log('[Luma Auto Register] Button type: ' + (submitBtn.type || 'none'));
+                            console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON ===');
+                            console.log('[Event Auto Register] Button text: "' + submitBtn.textContent + '"');
+                            console.log('[Event Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
+                            console.log('[Event Auto Register] Button type: ' + (submitBtn.type || 'none'));
 
                             // Try multiple click methods
                             submitBtn.click();
                             submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                             submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                            console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                            console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
 
                             // Wait for submission to process
                             setTimeout(function () {
-                              console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT ===');
+                              console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT ===');
                               var bodyText = document.body.textContent;
 
                               // Check for validation errors - prioritize red borders (most reliable)
@@ -10692,7 +12948,7 @@ class RegistrationManager {
                                       hasRedBorder: hasRedBorder,
                                       ariaInvalid: ariaInvalid
                                     });
-                                    console.log('[Luma Auto Register] ⚠️ Found field with validation error: ' + inpLabel + ' (red border: ' + hasRedBorder + ', aria-invalid: ' + ariaInvalid + ')');
+                                    console.log('[Event Auto Register] ⚠️ Found field with validation error: ' + inpLabel + ' (red border: ' + hasRedBorder + ', aria-invalid: ' + ariaInvalid + ')');
                                     hasValidationErrors = true;
                                   }
                                 }
@@ -10734,7 +12990,7 @@ class RegistrationManager {
                                           hasRedBorder: false,
                                           ariaInvalid: false
                                         });
-                                        console.log('[Luma Auto Register] ⚠️ Found field with error message: ' + fieldLabel);
+                                        console.log('[Event Auto Register] ⚠️ Found field with error message: ' + fieldLabel);
                                         hasValidationErrors = true;
                                       }
                                     }
@@ -10745,8 +13001,8 @@ class RegistrationManager {
                               // If validation errors found, try to fill missing fields
                               if (hasValidationErrors && fieldsWithErrors.length > 0) {
                                 var missingFieldLabels = fieldsWithErrors.map(function (f) { return f.label; });
-                                console.log('[Luma Auto Register] ⚠️ Validation errors detected! Missing fields: ' + missingFieldLabels.join(', '));
-                                console.log('[Luma Auto Register] === RE-SCANNING FOR MISSING FIELDS ===');
+                                console.log('[Event Auto Register] ⚠️ Validation errors detected! Missing fields: ' + missingFieldLabels.join(', '));
+                                console.log('[Event Auto Register] === RE-SCANNING FOR MISSING FIELDS ===');
 
                                 var newDropdowns = [];
 
@@ -10778,7 +13034,7 @@ class RegistrationManager {
                                   }
 
                                   if (looksLikeDropdown && !alreadyProcessed) {
-                                    console.log('[Luma Auto Register] Found missing dropdown with error: ' + fieldError.label + ' (placeholder: "' + inputPlaceholder + '")');
+                                    console.log('[Event Auto Register] Found missing dropdown with error: ' + fieldError.label + ' (placeholder: "' + inputPlaceholder + '")');
                                     newDropdowns.push({
                                       element: input,
                                       label: inputLabel,
@@ -10823,7 +13079,7 @@ class RegistrationManager {
                                     }
 
                                     if (!alreadyProcessed) {
-                                      console.log('[Luma Auto Register] Found missing dropdown: ' + inputLabel + ' (placeholder: "' + inputPlaceholder + '")');
+                                      console.log('[Event Auto Register] Found missing dropdown: ' + inputLabel + ' (placeholder: "' + inputPlaceholder + '")');
                                       newDropdowns.push({
                                         element: input,
                                         label: inputLabel,
@@ -10834,21 +13090,21 @@ class RegistrationManager {
                                 }
 
                                 if (newDropdowns.length > 0) {
-                                  console.log('[Luma Auto Register] Processing ' + newDropdowns.length + ' missing dropdown(s)...');
+                                  console.log('[Event Auto Register] Processing ' + newDropdowns.length + ' missing dropdown(s)...');
                                   for (var nd = 0; nd < newDropdowns.length; nd++) {
                                     customDropdownsToProcess.push(newDropdowns[nd]);
                                   }
 
                                   (function processNewDropdown(index) {
                                     if (index >= newDropdowns.length) {
-                                      console.log('[Luma Auto Register] All missing dropdowns processed, waiting before re-submitting...');
+                                      console.log('[Event Auto Register] All missing dropdowns processed, waiting before re-submitting...');
                                       setTimeout(function () {
                                         var submitBtn = document.querySelector('button[type="submit"], button:not([type])');
                                         var submitText = submitBtn ? submitBtn.textContent.toLowerCase() : '';
                                         if (submitText.indexOf('request to join') > -1 ||
                                           submitText.indexOf('submit') > -1 ||
                                           submitText.indexOf('register') > -1) {
-                                          console.log('[Luma Auto Register] Re-submitting form...');
+                                          console.log('[Event Auto Register] Re-submitting form...');
                                           submitBtn.click();
                                           submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 
@@ -10889,7 +13145,7 @@ class RegistrationManager {
 
                                     var dropdownInfo = newDropdowns[index];
                                     var dropdown = dropdownInfo.element;
-                                    console.log('[Luma Auto Register] Processing missing dropdown: ' + dropdownInfo.label);
+                                    console.log('[Event Auto Register] Processing missing dropdown: ' + dropdownInfo.label);
 
                                     try {
                                       dropdown.click();
@@ -10904,7 +13160,7 @@ class RegistrationManager {
                                             firstOption.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
                                             firstOption.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                                             firstOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                                            console.log('[Luma Auto Register] ✓ Selected option in missing dropdown: "' + optionText + '"');
+                                            console.log('[Event Auto Register] ✓ Selected option in missing dropdown: "' + optionText + '"');
 
                                             // For multi-select, close the menu
                                             if (dropdownInfo.isMultiSelect) {
@@ -10930,7 +13186,7 @@ class RegistrationManager {
                                         }
                                       }, 500);
                                     } catch (error) {
-                                      console.log('[Luma Auto Register] Error processing dropdown: ' + error);
+                                      console.log('[Event Auto Register] Error processing dropdown: ' + error);
                                       processNewDropdown(index + 1);
                                     }
                                   })(0);
@@ -10971,7 +13227,7 @@ class RegistrationManager {
                                 if (bodyTextLower.indexOf(successPhrases[i]) > -1) {
                                   success = true;
                                   foundPhrase = successPhrases[i];
-                                  console.log('[Luma Auto Register] ✓✓✓ SUCCESS PHRASE FOUND: "' + foundPhrase + '"');
+                                  console.log('[Event Auto Register] ✓✓✓ SUCCESS PHRASE FOUND: "' + foundPhrase + '"');
                                   break;
                                 }
                               }
@@ -10979,19 +13235,19 @@ class RegistrationManager {
                               // CRITICAL: Don't mark as successful if we filled 0 fields and there are validation errors
                               // This prevents false positives where "approval required" or similar text appears on the page BEFORE registration
                               if (success && fieldsToFill.length === 0 && hasValidationErrors) {
-                                console.log('[Luma Auto Register] ⚠️ Ignoring success phrase - no fields were filled and validation errors detected');
-                                console.log('[Luma Auto Register] This is likely a false positive from page content, not actual registration success');
+                                console.log('[Event Auto Register] ⚠️ Ignoring success phrase - no fields were filled and validation errors detected');
+                                console.log('[Event Auto Register] This is likely a false positive from page content, not actual registration success');
                                 success = false;
                               }
 
                               // IMPORTANT: Also check network success flag
-                              if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                console.log('[Luma Auto Register] ✓ Success confirmed via network response');
+                              if (!success && typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                console.log('[Event Auto Register] ✓ Success confirmed via network response');
                                 success = true;
                               }
-                              
+
                               if (success) {
-                                console.log('[Luma Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
+                                console.log('[Event Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
                                 var message = 'Registered successfully';
                                 if (fieldsToFill.length > 0) {
                                   message += ' (auto-filled ' + fieldsToFill.length + ' fields)';
@@ -11002,14 +13258,14 @@ class RegistrationManager {
                                 });
                               } else {
                                 // Poll for network flag (async response may be slow)
-                                console.log('[Luma Auto Register] First check failed, polling for network response...');
+                                console.log('[Event Auto Register] First check failed, polling for network response...');
                                 var pollAttempts = 0;
                                 var maxPollAttempts = 10; // 10 attempts * 500ms = 5 seconds
                                 
                                 var pollForNetwork = function() {
                                   pollAttempts++;
-                                  if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                    console.log('[Luma Auto Register] ✓ Success confirmed via network response (poll ' + pollAttempts + ')');
+                                  if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                    console.log('[Event Auto Register] ✓ Success confirmed via network response (poll ' + pollAttempts + ')');
                                     resolve({ success: true, message: 'Registered successfully (network confirmed)' });
                                     return;
                                   }
@@ -11018,16 +13274,16 @@ class RegistrationManager {
                                     return;
                                   }
                                   // All polls exhausted
-                                  console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (after ' + pollAttempts + ' network polls)');
-                                  console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 300));
-                                  var errorMsg = 'Could not confirm registration - please verify manually';
-                                  if (hasValidationErrors) {
-                                    errorMsg += ' (validation errors detected)';
-                                  }
-                                  resolve({
-                                    success: false,
-                                    message: errorMsg
-                                  });
+                                  console.log('[Event Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (after ' + pollAttempts + ' network polls)');
+                                console.log('[Event Auto Register] Page text sample: ' + bodyText.substring(0, 300));
+                                var errorMsg = 'Could not confirm registration - please verify manually';
+                                if (hasValidationErrors) {
+                                  errorMsg += ' (validation errors detected)';
+                                }
+                                resolve({
+                                  success: false,
+                                  message: errorMsg
+                                });
                                 };
                                 pollForNetwork();
                               }
@@ -11037,40 +13293,40 @@ class RegistrationManager {
                         }
 
                         // Button is NOT disabled, proceed to click it
-                        console.log('[Luma Auto Register] Button is NOT disabled, proceeding to click...');
+                        console.log('[Event Auto Register] Button is NOT disabled, proceeding to click...');
 
                         // Check if terms modal was already handled
                         var termsModalAlreadyHandled = (typeof window !== 'undefined' && window.__lumaTermsModalHandled);
-                        console.log('[Luma Auto Register] Terms modal handled flag: ' + termsModalAlreadyHandled);
+                        console.log('[Event Auto Register] Terms modal handled flag: ' + termsModalAlreadyHandled);
 
                         // Store the submitBtn in a closure so any callback can use it
                         var submitBtnToClick = submitBtn;
 
                         // Check for terms modal before submitting (only if not already handled)
                         if (!termsModalAlreadyHandled) {
-                          console.log('[Luma Auto Register] Terms modal not yet handled, checking...');
+                          console.log('[Event Auto Register] Terms modal not yet handled, checking...');
                           if (handleTermsModal(function () {
                             // After terms modal is handled, click the button we already found
-                            console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
-                            console.log('[Luma Auto Register] Using previously found button: "' + (submitBtnToClick ? submitBtnToClick.textContent.trim() : 'NOT FOUND') + '"');
+                            console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON (after terms) ===');
+                            console.log('[Event Auto Register] Using previously found button: "' + (submitBtnToClick ? submitBtnToClick.textContent.trim() : 'NOT FOUND') + '"');
 
                             // Wait a moment for modal to fully close
                             setTimeout(function () {
                               if (submitBtnToClick && submitBtnToClick.offsetParent !== null && !submitBtnToClick.disabled) {
-                                console.log('[Luma Auto Register] Clicking submit button (after terms modal closed)...');
+                                console.log('[Event Auto Register] Clicking submit button (after terms modal closed)...');
                                 submitBtnToClick.click();
                                 submitBtnToClick.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                 submitBtnToClick.dispatchEvent(new Event('submit', { bubbles: true }));
-                                console.log('[Luma Auto Register] ✓ Submit button clicked (after terms modal)!');
+                                console.log('[Event Auto Register] ✓ Submit button clicked (after terms modal)!');
                               } else {
                                 // Fallback: try to find button again
-                                console.log('[Luma Auto Register] ⚠️ Previously found button not available, searching again...');
+                                console.log('[Event Auto Register] ⚠️ Previously found button not available, searching again...');
                                 var submitBtn2 = document.querySelector('button[type="submit"], button:not([type])');
                                 var submitText2 = submitBtn2 ? submitBtn2.textContent.toLowerCase() : '';
                                 if (submitText2.indexOf('request to join') > -1 ||
                                   submitText2.indexOf('submit') > -1 ||
                                   submitText2.indexOf('register') > -1) {
-                                  console.log('[Luma Auto Register] Found button again, clicking...');
+                                  console.log('[Event Auto Register] Found button again, clicking...');
                                   submitBtn2.click();
                                   submitBtn2.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                   submitBtn2.dispatchEvent(new Event('submit', { bubbles: true }));
@@ -11078,29 +13334,29 @@ class RegistrationManager {
                               }
                             }, 500); // Wait 500ms for modal to close
                           })) {
-                            console.log('[Luma Auto Register] Terms modal was found and is being handled, will click after...');
+                            console.log('[Event Auto Register] Terms modal was found and is being handled, will click after...');
                             return; // Terms modal was found and handled, callback will handle the click
                           }
                         }
 
                         // Button is enabled and terms modal already handled (or not needed), click immediately!
-                        console.log('[Luma Auto Register] Proceeding to click submit button immediately (termsModalAlreadyHandled: ' + termsModalAlreadyHandled + ')...');
-                        console.log('[Luma Auto Register] === CLICKING SUBMIT BUTTON ===');
-                        console.log('[Luma Auto Register] Button text: "' + submitBtn.textContent + '"');
-                        console.log('[Luma Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
-                        console.log('[Luma Auto Register] Button type: ' + (submitBtn.type || 'none'));
+                        console.log('[Event Auto Register] Proceeding to click submit button immediately (termsModalAlreadyHandled: ' + termsModalAlreadyHandled + ')...');
+                        console.log('[Event Auto Register] === CLICKING SUBMIT BUTTON ===');
+                        console.log('[Event Auto Register] Button text: "' + submitBtn.textContent + '"');
+                        console.log('[Event Auto Register] Button aria-label: "' + (submitBtn.getAttribute('aria-label') || 'none') + '"');
+                        console.log('[Event Auto Register] Button type: ' + (submitBtn.type || 'none'));
 
                         // Try multiple click methods to ensure it works
                         submitBtn.click();
                         submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                         submitBtn.dispatchEvent(new Event('submit', { bubbles: true }));
 
-                        console.log('[Luma Auto Register] ✓ Submit button clicked (3 methods)!');
+                        console.log('[Event Auto Register] ✓ Submit button clicked (3 methods)!');
 
                         // Wait for submission to process - increased delay to let React process the submission
                         // Don't check for validation errors too quickly as React might still be processing
                         setTimeout(function () {
-                          console.log('[Luma Auto Register] === CHECKING REGISTRATION RESULT ===');
+                          console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT ===');
                           var bodyText = document.body.textContent;
 
                           // Check for validation errors first (but only after giving React time to process)
@@ -11130,7 +13386,7 @@ class RegistrationManager {
                                 }
                                 if (fieldLabel && missingFields.indexOf(fieldLabel) === -1) {
                                   missingFields.push(fieldLabel);
-                                  console.log('[Luma Auto Register] ⚠️ Found validation error for field: ' + fieldLabel);
+                                  console.log('[Event Auto Register] ⚠️ Found validation error for field: ' + fieldLabel);
                                 }
                               }
                             }
@@ -11154,7 +13410,7 @@ class RegistrationManager {
                               }
                               if (inpLabel && missingFields.indexOf(inpLabel) === -1) {
                                 missingFields.push(inpLabel);
-                                console.log('[Luma Auto Register] ⚠️ Found field with validation error (red border): ' + inpLabel);
+                                console.log('[Event Auto Register] ⚠️ Found field with validation error (red border): ' + inpLabel);
                                 hasValidationErrors = true;
                               }
                             }
@@ -11163,7 +13419,7 @@ class RegistrationManager {
                           // If validation errors found, verify fields are actually empty before trying to fill
                           // Sometimes React shows validation errors even when fields are filled (timing issue)
                           if (hasValidationErrors && missingFields.length > 0) {
-                            console.log('[Luma Auto Register] ⚠️ Validation errors detected! Missing fields: ' + missingFields.join(', '));
+                            console.log('[Event Auto Register] ⚠️ Validation errors detected! Missing fields: ' + missingFields.join(', '));
 
                             // First, verify which fields are actually empty (not just showing errors)
                             var actuallyEmptyFields = [];
@@ -11188,9 +13444,9 @@ class RegistrationManager {
                                   var valueForCheck = (inputForCheck.value || '').trim();
                                   if (!valueForCheck || valueForCheck.length === 0) {
                                     actuallyEmptyFields.push(missingFieldLabel);
-                                    console.log('[Luma Auto Register] Field is actually empty: ' + missingFieldLabel);
+                                    console.log('[Event Auto Register] Field is actually empty: ' + missingFieldLabel);
                                   } else {
-                                    console.log('[Luma Auto Register] Field has value (validation error may be false positive): ' + missingFieldLabel + ' = "' + valueForCheck + '"');
+                                    console.log('[Event Auto Register] Field has value (validation error may be false positive): ' + missingFieldLabel + ' = "' + valueForCheck + '"');
                                   }
                                   break;
                                 }
@@ -11198,7 +13454,7 @@ class RegistrationManager {
                             }
 
                             if (actuallyEmptyFields.length === 0) {
-                              console.log('[Luma Auto Register] All fields have values - validation errors may be false positives, waiting longer before checking result...');
+                              console.log('[Event Auto Register] All fields have values - validation errors may be false positives, waiting longer before checking result...');
                               // Fields are filled, just wait longer for React to process
                               setTimeout(function () {
                                 // Re-check for success
@@ -11229,8 +13485,8 @@ class RegistrationManager {
                               return;
                             }
 
-                            console.log('[Luma Auto Register] === RE-SCANNING FOR MISSING FIELDS ===');
-                            console.log('[Luma Auto Register] Actually empty fields: ' + actuallyEmptyFields.join(', '));
+                            console.log('[Event Auto Register] === RE-SCANNING FOR MISSING FIELDS ===');
+                            console.log('[Event Auto Register] Actually empty fields: ' + actuallyEmptyFields.join(', '));
 
                             // Re-scan for dropdowns that might have been missed
                             var allFormInputs = document.querySelectorAll('input[type="text"], input:not([type]), input[type=""]');
@@ -11272,7 +13528,7 @@ class RegistrationManager {
                                 }
 
                                 if (!alreadyProcessed) {
-                                  console.log('[Luma Auto Register] Found missing dropdown: ' + inputLabel + ' (placeholder: "' + inputPlaceholder + '")');
+                                  console.log('[Event Auto Register] Found missing dropdown: ' + inputLabel + ' (placeholder: "' + inputPlaceholder + '")');
                                   newDropdowns.push({
                                     element: input,
                                     label: inputLabel,
@@ -11284,7 +13540,7 @@ class RegistrationManager {
 
                             // Process new dropdowns
                             if (newDropdowns.length > 0) {
-                              console.log('[Luma Auto Register] Processing ' + newDropdowns.length + ' missing dropdown(s)...');
+                              console.log('[Event Auto Register] Processing ' + newDropdowns.length + ' missing dropdown(s)...');
                               // Add to existing list and process them
                               for (var nd = 0; nd < newDropdowns.length; nd++) {
                                 customDropdownsToProcess.push(newDropdowns[nd]);
@@ -11294,14 +13550,14 @@ class RegistrationManager {
                               (function processNewDropdown(index) {
                                 if (index >= newDropdowns.length) {
                                   // All new dropdowns processed, try submitting again
-                                  console.log('[Luma Auto Register] All missing dropdowns processed, waiting before re-submitting...');
+                                  console.log('[Event Auto Register] All missing dropdowns processed, waiting before re-submitting...');
                                   setTimeout(function () {
                                     var submitBtn = document.querySelector('button[type="submit"], button:not([type])');
                                     var submitText = submitBtn ? submitBtn.textContent.toLowerCase() : '';
                                     if (submitText.indexOf('request to join') > -1 ||
                                       submitText.indexOf('submit') > -1 ||
                                       submitText.indexOf('register') > -1) {
-                                      console.log('[Luma Auto Register] Re-submitting form...');
+                                      console.log('[Event Auto Register] Re-submitting form...');
                                       submitBtn.click();
                                       submitBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 
@@ -11342,7 +13598,7 @@ class RegistrationManager {
 
                                 var dropdownInfo = newDropdowns[index];
                                 var dropdown = dropdownInfo.element;
-                                console.log('[Luma Auto Register] Processing missing dropdown: ' + dropdownInfo.label);
+                                console.log('[Event Auto Register] Processing missing dropdown: ' + dropdownInfo.label);
 
                                 try {
                                   dropdown.click();
@@ -11355,7 +13611,7 @@ class RegistrationManager {
                                         var firstOption = menuOptions[0];
                                         firstOption.click();
                                         firstOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                                        console.log('[Luma Auto Register] ✓ Selected option in missing dropdown');
+                                        console.log('[Event Auto Register] ✓ Selected option in missing dropdown');
                                         setTimeout(function () {
                                           processNewDropdown(index + 1);
                                         }, 500);
@@ -11367,7 +13623,7 @@ class RegistrationManager {
                                     }
                                   }, 500);
                                 } catch (error) {
-                                  console.log('[Luma Auto Register] Error processing dropdown: ' + error);
+                                  console.log('[Event Auto Register] Error processing dropdown: ' + error);
                                   processNewDropdown(index + 1);
                                 }
                               })(0);
@@ -11407,7 +13663,7 @@ class RegistrationManager {
                             if (bodyTextLower.indexOf(successPhrases[i]) > -1) {
                               success = true;
                               foundPhrase = successPhrases[i];
-                              console.log('[Luma Auto Register] ✓✓✓ SUCCESS PHRASE FOUND: "' + foundPhrase + '"');
+                              console.log('[Event Auto Register] ✓✓✓ SUCCESS PHRASE FOUND: "' + foundPhrase + '"');
                               break;
                             }
                           }
@@ -11415,19 +13671,19 @@ class RegistrationManager {
                           // CRITICAL: Don't mark as successful if we filled 0 fields and there are validation errors
                           // This prevents false positives where success-like text appears on the page BEFORE registration
                           if (success && fieldsToFill.length === 0 && hasValidationErrors) {
-                            console.log('[Luma Auto Register] ⚠️ Ignoring success phrase - no fields were filled and validation errors detected');
-                            console.log('[Luma Auto Register] This is likely a false positive from page content, not actual registration success');
+                            console.log('[Event Auto Register] ⚠️ Ignoring success phrase - no fields were filled and validation errors detected');
+                            console.log('[Event Auto Register] This is likely a false positive from page content, not actual registration success');
                             success = false;
                           }
 
                           // IMPORTANT: Also check network success flag
-                          if (!success && typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                            console.log('[Luma Auto Register] ✓ Success confirmed via network response');
+                          if (!success && typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                            console.log('[Event Auto Register] ✓ Success confirmed via network response');
                             success = true;
                           }
-                          
+
                           if (success) {
-                            console.log('[Luma Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
+                            console.log('[Event Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
                             var message = 'Registered successfully';
                             if (fieldsToFill.length > 0) {
                               message += ' (auto-filled ' + fieldsToFill.length + ' fields)';
@@ -11438,14 +13694,14 @@ class RegistrationManager {
                             });
                           } else {
                             // Poll for network flag (async response may be slow)
-                            console.log('[Luma Auto Register] First check failed, polling for network response...');
+                            console.log('[Event Auto Register] First check failed, polling for network response...');
                             var netPollAttempts = 0;
                             var maxNetPollAttempts = 10; // 10 attempts * 500ms = 5 seconds
                             
                             var pollForNetworkFlag = function() {
                               netPollAttempts++;
-                              if (typeof window !== 'undefined' && window.__lumaAutoRegisterNetworkSuccessFlag) {
-                                console.log('[Luma Auto Register] ✓ Success confirmed via network response (poll ' + netPollAttempts + ')');
+                              if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                console.log('[Event Auto Register] ✓ Success confirmed via network response (poll ' + netPollAttempts + ')');
                                 resolve({ success: true, message: 'Registered successfully (network confirmed)' });
                                 return;
                               }
@@ -11454,16 +13710,16 @@ class RegistrationManager {
                                 return;
                               }
                               // All polls exhausted
-                              console.log('[Luma Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (after ' + netPollAttempts + ' network polls)');
-                              console.log('[Luma Auto Register] Page text sample: ' + bodyText.substring(0, 300));
-                              var errorMsg = 'Could not confirm registration - please verify manually';
-                              if (hasValidationErrors) {
-                                errorMsg += ' (validation errors detected)';
-                              }
-                              resolve({
-                                success: false,
-                                message: errorMsg
-                              });
+                              console.log('[Event Auto Register] ✗✗✗ COULD NOT CONFIRM REGISTRATION (after ' + netPollAttempts + ' network polls)');
+                            console.log('[Event Auto Register] Page text sample: ' + bodyText.substring(0, 300));
+                            var errorMsg = 'Could not confirm registration - please verify manually';
+                            if (hasValidationErrors) {
+                              errorMsg += ' (validation errors detected)';
+                            }
+                            resolve({
+                              success: false,
+                              message: errorMsg
+                            });
                             };
                             pollForNetworkFlag();
                           }
@@ -11476,7 +13732,7 @@ class RegistrationManager {
               } // End of processForm function
 
             } catch (error) {
-              console.log('[Luma Auto Register] ✗ ERROR: ' + error.message);
+              console.log('[Event Auto Register] ✗ ERROR: ' + error.message);
               resolve({ success: false, message: error.message });
             }
           }); // End of Promise
@@ -11576,13 +13832,131 @@ class RegistrationManager {
         this.sendLog('info', `⚠️ Manual Review: ${event.title} - ${registrationResult.message}`);
       } else if (registrationResult.success) {
         event.status = 'success';
+        event.message = registrationResult.message || '';
         this.stats.success++;
         this.sendLog('success', `✓ Registered: ${event.title}`);
+        
+        // Try to extract date from event page if missing
+        if (!event.date && tab?.id) {
+          try {
+            const dateResult = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              func: function() {
+                var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                var days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                
+                // Helper to resolve relative dates
+                function resolveRelativeDate(text) {
+                  var today = new Date();
+                  var textLower = text.toLowerCase().trim();
+                  
+                  if (textLower.includes('tomorrow')) {
+                    var tomorrow = new Date(today);
+                    tomorrow.setDate(today.getDate() + 1);
+                    return months[tomorrow.getMonth()] + ' ' + tomorrow.getDate();
+                  }
+                  if (textLower.includes('today')) {
+                    return months[today.getMonth()] + ' ' + today.getDate();
+                  }
+                  if (textLower.includes('yesterday')) {
+                    var yesterday = new Date(today);
+                    yesterday.setDate(today.getDate() - 1);
+                    return months[yesterday.getMonth()] + ' ' + yesterday.getDate();
+                  }
+                  
+                  // Check for day names
+                  for (var i = 0; i < days.length; i++) {
+                    if (textLower.includes(days[i].toLowerCase())) {
+                      var targetDay = i;
+                      var currentDay = today.getDay();
+                      var daysUntil = targetDay - currentDay;
+                      if (daysUntil <= 0) daysUntil += 7;
+                      
+                      var targetDate = new Date(today);
+                      targetDate.setDate(today.getDate() + daysUntil);
+                      return months[targetDate.getMonth()] + ' ' + targetDate.getDate();
+                    }
+                  }
+                  return null;
+                }
+                
+                // Try multiple patterns to find the date
+                var bodyText = document.body.innerText || '';
+                var datePatterns = [
+                  // "Sat, Feb 8" or "Saturday, Feb 8"
+                  /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,]?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i,
+                  // "Feb 8, 2025" or "Feb 8 2025"
+                  /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}[,]?\s*\d{4}\b/i,
+                  // "Feb 8 at 7:00 PM"
+                  /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:at|@)\s+\d{1,2}:\d{2}\s*(?:AM|PM)?/i,
+                  // Just "Feb 8"
+                  /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i
+                ];
+                
+                for (var i = 0; i < datePatterns.length; i++) {
+                  var match = bodyText.match(datePatterns[i]);
+                  if (match) {
+                    // Clean up - just return "Mon Feb 8" format
+                    var dateStr = match[0];
+                    // Extract just month and day
+                    var monthDayMatch = dateStr.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/i);
+                    if (monthDayMatch) {
+                      return monthDayMatch[0];
+                    }
+                    return dateStr;
+                  }
+                }
+                
+                // Try relative dates (Tomorrow, Today, Saturday, etc.)
+                var relativePatterns = ['tomorrow', 'today', 'yesterday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+                for (var j = 0; j < relativePatterns.length; j++) {
+                  if (bodyText.toLowerCase().includes(relativePatterns[j])) {
+                    var resolved = resolveRelativeDate(relativePatterns[j]);
+                    if (resolved) {
+                      return resolved;
+                    }
+                  }
+                }
+                
+                // Try to find date in meta tags or structured data
+                var metaDate = document.querySelector('meta[property="event:start_time"], meta[name="start_date"], time[datetime]');
+                if (metaDate) {
+                  var dateValue = metaDate.getAttribute('content') || metaDate.getAttribute('datetime');
+                  if (dateValue) {
+                    try {
+                      var d = new Date(dateValue);
+                      if (!isNaN(d.getTime())) {
+                        return months[d.getMonth()] + ' ' + d.getDate();
+                      }
+                    } catch (e) {}
+                  }
+                }
+                
+                return null;
+              }
+            });
+            
+            if (dateResult?.[0]?.result) {
+              event.date = dateResult[0].result;
+              this.sendLog('info', `  📅 Extracted date from event page: ${event.date}`);
+            }
+          } catch (e) {
+            // Ignore date extraction errors
+            console.log('[Background] Could not extract date from event page:', e);
+          }
+        }
+        
+        // Save to persistent storage for tracking
+        await this.saveRegisteredEvent(event);
+        // Handle successful registration for adaptive speed
+        this.handleSuccessfulRegistration();
       } else {
         event.status = 'failed';
         event.message = registrationResult.message;
         this.stats.failed++;
         this.sendLog('error', `✗ Failed: ${event.title} - ${registrationResult.message}`);
+        // Check for rate limiting
+        this.handleRateLimitDetection(registrationResult.message);
       }
 
       // Remove overlay from the tab when registration completes (success or failure)
@@ -11592,7 +13966,7 @@ class RegistrationManager {
             target: { tabId: tab.id },
             func: function () {
               try {
-                var overlay = document.getElementById('__lumaAutoRegisterOverlay');
+                var overlay = document.getElementById('__eventAutoRegisterOverlay');
                 if (overlay && overlay.parentNode) {
                   overlay.parentNode.removeChild(overlay);
                 }
@@ -11617,6 +13991,8 @@ class RegistrationManager {
       this.stats.failed++;
       this.sendLog('error', `✗ Error: ${event.title} - ${error.message}`);
       this.sendLog('info', `  Keeping tab open for manual review...`);
+      // Check for rate limiting
+      this.handleRateLimitDetection(error.message);
     } finally {
       // Only close tab if registration was successful
       // Keep tabs open for failed/manual registrations so user can review
@@ -11710,7 +14086,22 @@ class RegistrationManager {
     }
   }
 
-  sendLog(level, message) {
+  // Detect which platform a URL belongs to
+  detectPlatform(url) {
+    if (!url) return 'unknown';
+    if (url.includes('lemonade.social')) return 'lemonade';
+    if (url.includes('lu.ma') || url.includes('luma.com')) return 'luma';
+    return 'unknown';
+  }
+
+  sendLog(level, message, context = {}) {
+    // Persist log to storage via DebugLogger
+    debugLogger.log(level, message, {
+      ...context,
+      processing: this.processing,
+      stats: { ...this.stats }
+    });
+
     // Send to popup (catch error if popup is closed)
     try {
       chrome.runtime.sendMessage({
@@ -11765,6 +14156,124 @@ class RegistrationManager {
 
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async getRandomDelay() {
+    // Get user speed settings
+    const settings = await chrome.storage.local.get(['userSettings']);
+    const speedMode = settings.userSettings?.speedMode || 'balanced';
+    const adaptiveSpeed = settings.userSettings?.adaptiveSpeed !== false;
+    
+    const mode = this.speedModes[speedMode] || this.speedModes.balanced;
+    
+    // Calculate base delay with randomization
+    const range = mode.maxDelay - mode.minDelay;
+    let delay = mode.minDelay + Math.random() * range;
+    
+    // Apply adaptive multiplier if enabled
+    if (adaptiveSpeed && this.adaptiveDelayMultiplier > 1.0) {
+      delay *= this.adaptiveDelayMultiplier;
+      this.sendLog('info', `  ⚠️ Adaptive slowdown active (${this.adaptiveDelayMultiplier.toFixed(1)}x)`);
+    }
+    
+    return Math.round(delay);
+  }
+
+  async shouldTakeBatchBreak() {
+    const settings = await chrome.storage.local.get(['userSettings']);
+    const speedMode = settings.userSettings?.speedMode || 'balanced';
+    const mode = this.speedModes[speedMode] || this.speedModes.balanced;
+    
+    // No batch breaks for turbo mode
+    if (mode.batchSize === 0) return { shouldBreak: false, duration: 0 };
+    
+    // Check if we've processed enough for a batch break
+    if (this.stats.processed > 0 && this.stats.processed % mode.batchSize === 0) {
+      return { shouldBreak: true, duration: mode.batchBreak };
+    }
+    
+    return { shouldBreak: false, duration: 0 };
+  }
+
+  handleRateLimitDetection(errorMessage) {
+    // Check if the error indicates rate limiting
+    const rateLimitIndicators = [
+      'too many requests',
+      'rate limit',
+      'try again later',
+      'slow down',
+      'temporarily blocked',
+      'please wait',
+      'too fast',
+      '429'
+    ];
+    
+    const msgLower = (errorMessage || '').toLowerCase();
+    const isRateLimited = rateLimitIndicators.some(indicator => msgLower.includes(indicator));
+    
+    if (isRateLimited) {
+      this.consecutiveFailures++;
+      // Increase delay multiplier (max 3x)
+      this.adaptiveDelayMultiplier = Math.min(3.0, 1.0 + (this.consecutiveFailures * 0.5));
+      this.sendLog('warn', `⚠️ Rate limit detected! Slowing down (${this.adaptiveDelayMultiplier.toFixed(1)}x speed)`);
+      return true;
+    }
+    
+    return false;
+  }
+
+  handleSuccessfulRegistration() {
+    // Gradually reduce adaptive delay after successful registrations
+    if (this.adaptiveDelayMultiplier > 1.0) {
+      this.adaptiveDelayMultiplier = Math.max(1.0, this.adaptiveDelayMultiplier - 0.1);
+    }
+    this.consecutiveFailures = Math.max(0, this.consecutiveFailures - 1);
+  }
+
+  async saveRegisteredEvent(event) {
+    // Save successfully registered event to persistent storage
+    try {
+      const result = await chrome.storage.local.get(['registeredEvents', 'userSettings']);
+      const registeredEvents = result.registeredEvents || {};
+      const userSettings = result.userSettings || {};
+      
+      // Use eventId as the key for deduplication
+      const eventKey = event.eventId || event.url;
+      
+      registeredEvents[eventKey] = {
+        eventId: event.eventId,
+        title: event.title,
+        url: event.url,
+        date: event.date || '',
+        registeredAt: new Date().toISOString(),
+        status: event.status,
+        message: event.message || ''
+      };
+      
+      await chrome.storage.local.set({ registeredEvents });
+      console.log('[Background] Saved registered event:', event.title);
+      
+      // Also save to Google Sheets API (fire and forget - don't await)
+      if (googleSheetsAPI.isConfigured() && userSettings.email) {
+        const personName = [userSettings.firstName, userSettings.lastName].filter(Boolean).join(' ');
+        googleSheetsAPI.addRegistration({
+          url: event.url,
+          title: event.title,
+          date: event.date || '',
+          email: userSettings.email,
+          name: personName,
+          calendar: event.calendarId || 'default'
+        }).then(result => {
+          if (result.success) {
+            console.log('[Background] Saved to Google Sheets:', event.title, 'in calendar:', event.calendarId || 'default');
+          }
+        }).catch(err => {
+          console.error('[Background] Failed to save to Google Sheets:', err);
+        });
+      }
+    } catch (error) {
+      console.error('[Background] Failed to save registered event:', error);
+    }
   }
 
   async saveState() {
@@ -11852,5 +14361,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'CLOUDFLARE_CHALLENGE_COMPLETED':
       manager.handleCloudflareChallengeCompleted();
       break;
+    case 'EXPORT_DEBUG_LOGS':
+      (async () => {
+        try {
+          const report = await debugLogger.exportDebugReport();
+          sendResponse({ success: true, report: report });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true; // Keep channel open for async response
+    case 'CLEAR_DEBUG_LOGS':
+      (async () => {
+        try {
+          await debugLogger.clearLogs();
+          sendResponse({ success: true });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true; // Keep channel open for async response
   }
 });

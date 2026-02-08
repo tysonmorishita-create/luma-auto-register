@@ -35,15 +35,27 @@
 
     <div class="section" id="eventsSection" style="display: none;">
       <h2>Step 2: Select Events</h2>
+      <div id="eventsSummary" class="events-summary" style="display: none;">
+        <span id="summaryText" class="summary-text"></span>
+        <div class="summary-buttons">
+          <button id="toggleRegisteredBtn" class="toggle-registered-btn">Hide Registered</button>
+          <button id="moveToBottomBtn" class="toggle-registered-btn" title="Move registered events to the bottom">↓ Move to Bottom</button>
+        </div>
+      </div>
       <div class="events-header">
         <span id="eventCount">0 events found</span>
         <button id="selectAllBtn" class="btn btn-small">Select All</button>
         <button id="deselectAllBtn" class="btn btn-small">Deselect All</button>
       </div>
-      <div class="search-container">
-        <input type="text" id="eventSearch" class="search-input" placeholder="🔍 Search events...">
-        <span id="searchCount" class="search-count"></span>
+      <div class="filter-row">
+        <div class="search-container">
+          <input type="text" id="eventSearch" class="search-input" placeholder="🔍 Search events...">
+        </div>
+        <select id="dateFilter" class="date-filter">
+          <option value="">All Dates</option>
+        </select>
       </div>
+      <span id="searchCount" class="search-count"></span>
       <div id="eventsList" class="events-list"></div>
     </div>
 
@@ -97,13 +109,19 @@
     <div id="logSection" class="section">
       <h3>Activity Log</h3>
       <div id="logContainer" class="log-container"></div>
-      <button id="toggleDebugBtn" class="btn btn-small" style="margin-top: 8px;">Show Debug Console</button>
+      <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <button id="toggleDebugBtn" class="btn btn-small">Show Debug Console</button>
+        <button id="exportDebugBtnMain" class="btn btn-small" style="background: #6366f1; color: white;">🐛 Export Debug Logs</button>
+      </div>
     </div>
 
     <div id="debugSection" class="section" style="display: none;">
       <h3>Debug Information</h3>
       <div id="debugContainer" class="debug-container"></div>
-      <button id="clearDebugBtn" class="btn btn-small" style="margin-top: 8px;">Clear Debug</button>
+      <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <button id="clearDebugBtn" class="btn btn-small">Clear Debug</button>
+        <button id="exportDebugBtn" class="btn btn-small" style="background: #6366f1; color: white;">📥 Export Debug Logs</button>
+      </div>
     </div>
   </div>
 

@@ -1,18 +1,40 @@
-// Content Script - Runs on all Luma pages
+// Content Script - Runs on Luma and Lemonade pages
 // This script helps detect page state and can assist with registration
 
 (function() {
   'use strict';
 
+  // Detect which platform we're on
+  function getPlatform() {
+    const url = window.location.href;
+    if (url.includes('lemonade.social')) return 'lemonade';
+    if (url.includes('lu.ma') || url.includes('luma.com')) return 'luma';
+    return 'unknown';
+  }
+
   // Helper to detect if we're on an event page
   function isEventPage() {
     const url = window.location.href;
-    const isLumaEvent = /(?:lu\.ma|luma\.com)\/[a-zA-Z0-9-]+/.test(url);
-    const notExcluded = !url.includes('/calendar') && 
-                       !url.includes('/profile') && 
-                       !url.includes('/discover') &&
-                       !url.includes('/create');
-    return isLumaEvent && notExcluded;
+    const platform = getPlatform();
+    
+    if (platform === 'luma') {
+      const isLumaEvent = /(?:lu\.ma|luma\.com)\/[a-zA-Z0-9-]+/.test(url);
+      const notExcluded = !url.includes('/calendar') && 
+                         !url.includes('/profile') && 
+                         !url.includes('/discover') &&
+                         !url.includes('/create');
+      return isLumaEvent && notExcluded;
+    }
+    
+    if (platform === 'lemonade') {
+      // Lemonade event pages typically use /e/ or /event/ paths
+      // Calendar pages use /s/ or /space/ paths
+      const isLemonadeEvent = /lemonade\.social\/e\/[a-zA-Z0-9-]+/.test(url) ||
+                              /lemonade\.social\/event\/[a-zA-Z0-9-]+/.test(url);
+      return isLemonadeEvent;
+    }
+    
+    return false;
   }
 
   // Helper to detect if already registered
@@ -23,37 +45,75 @@
       .toLowerCase()
       .replace(/[\u2018\u2019\u201B]/g, "'"); // map various apostrophes to '
 
-    return text.includes("you're going") ||
-           text.includes("you're registered") ||
-           text.includes("you're in") ||
-           text.includes('you are registered') ||
-           text.includes('already registered') ||
-           text.includes('see you there');
+    const platform = getPlatform();
+    
+    // Common patterns across platforms
+    const commonPatterns = [
+      "you're going",
+      "you're registered",
+      "you're in",
+      'you are registered',
+      'already registered',
+      'see you there'
+    ];
+    
+    // Lemonade-specific patterns
+    const lemonadePatterns = [
+      'ticket confirmed',
+      'registration confirmed',
+      'registration successful',
+      'you have a ticket',
+      'your ticket',
+      'check-in',
+      'checked in'
+    ];
+    
+    const patterns = platform === 'lemonade' 
+      ? [...commonPatterns, ...lemonadePatterns]
+      : commonPatterns;
+    
+    return patterns.some(pattern => text.includes(pattern));
   }
 
   // Helper to detect if event is full
   function isEventFull() {
-    const bodyText = document.body.textContent;
-    return bodyText.includes('Event Full') ||
-           bodyText.includes('Sold Out') ||
-           bodyText.includes('Join Waitlist') ||
-           bodyText.includes('Waitlist');
+    const bodyText = document.body.textContent.toLowerCase();
+    return bodyText.includes('event full') ||
+           bodyText.includes('sold out') ||
+           bodyText.includes('join waitlist') ||
+           bodyText.includes('waitlist') ||
+           bodyText.includes('capacity reached') ||
+           bodyText.includes('no tickets available');
   }
 
   // Helper to find registration button
   function findRegisterButton() {
+    const platform = getPlatform();
+    
     const buttons = [
       ...document.querySelectorAll('button'),
-      ...document.querySelectorAll('a[role="button"]')
+      ...document.querySelectorAll('a[role="button"]'),
+      ...document.querySelectorAll('[class*="button"]'),
+      ...document.querySelectorAll('[class*="btn"]')
+    ];
+
+    // Button text patterns to look for
+    const buttonPatterns = [
+      'register',
+      'rsvp',
+      'sign up',
+      'join event',
+      'get tickets',
+      'get ticket',
+      'buy ticket',
+      'claim ticket',
+      'reserve',
+      'attend'
     ];
 
     for (const btn of buttons) {
-      const text = btn.textContent.toLowerCase();
-      if (text.includes('register') || 
-          text.includes('rsvp') || 
-          text.includes('sign up') ||
-          text.includes('join event') ||
-          text.includes('get tickets')) {
+      const text = btn.textContent.toLowerCase().trim();
+      if (buttonPatterns.some(pattern => text.includes(pattern))) {
         return btn;
       }
     }
@@ -145,7 +205,8 @@
   });
 
   // Start observing
-  if (isEventPage()) {
+  const platform = getPlatform();
+  if (isEventPage() || platform !== 'unknown') {
     observer.observe(document.body, {
       childList: true,
       subtree: true
@@ -153,5 +214,5 @@
   }
 
   // Log that content script is loaded (for debugging)
-  console.log('Luma Auto Register - Content Script Loaded');
+  console.log(`Event Auto Register - Content Script Loaded (Platform: ${platform})`);
 })();

@@ -1,0 +1,20 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+debug.log
+
+# Cursor/IDE
+.cursor/
+
+# Debug files
+*-debug-report-*.json
+
+# Node modules (if any)
+node_modules/
+
+# Environment files
+.env
+.env.local
