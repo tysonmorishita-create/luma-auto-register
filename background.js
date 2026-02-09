@@ -571,6 +571,55 @@ function sanitizeSheetName(name) {
     .trim() || 'default';
 }
 
+/**
+ * Normalize a Luma event URL to a consistent format for comparison
+ * Handles both lu.ma and luma.com domains
+ * This MUST match the normalization in google-apps-script.js
+ * 
+ * Examples:
+ * - "https://lu.ma/h7i66r2z" -> "h7i66r2z"
+ * - "https://luma.com/h7i66r2z" -> "h7i66r2z"
+ * - "https://lu.ma/h7i66r2z?ref=abc" -> "h7i66r2z"
+ * - "h7i66r2z" -> "h7i66r2z" (already just a slug)
+ */
+function normalizeEventUrl(url) {
+  if (!url) return '';
+  
+  url = String(url).trim();
+  
+  // If it's already just a slug (no slashes), return as-is
+  if (!url.includes('/') && !url.includes('.')) {
+    return url.toLowerCase();
+  }
+  
+  // Try to extract slug from various URL formats
+  // Match: lu.ma/SLUG, luma.com/SLUG, or just /SLUG
+  const match = url.match(/(?:lu\.ma|luma\.com)\/([a-zA-Z0-9_-]+)(?:[?#]|$)/i);
+  if (match) {
+    return match[1].toLowerCase();
+  }
+  
+  // Fallback: try to get the last path segment
+  try {
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/').filter(p => p);
+    if (pathParts.length > 0) {
+      // Return the last path segment, removing any query/hash
+      return pathParts[pathParts.length - 1].toLowerCase();
+    }
+  } catch (e) {
+    // URL parsing failed, try simple extraction
+    const simplePath = url.split('?')[0].split('#')[0];
+    const parts = simplePath.split('/').filter(p => p);
+    if (parts.length > 0) {
+      return parts[parts.length - 1].toLowerCase();
+    }
+  }
+  
+  // Return original URL lowercased as last resort
+  return url.toLowerCase();
+}
+
 class RegistrationManager {
   constructor() {
     this.queue = [];
@@ -2057,7 +2106,9 @@ class RegistrationManager {
         const newThresholdMs = 48 * 60 * 60 * 1000; // 48 hours
         
         const isRecentlyFirstSeen = (url) => {
-          const firstSeen = firstSeenDates[url];
+          // Use normalized URL to look up first seen date
+          const normalizedUrl = normalizeEventUrl(url);
+          const firstSeen = firstSeenDates[normalizedUrl];
           if (!firstSeen || !firstSeen.date) return false;
           const firstSeenDate = new Date(firstSeen.date);
           return (now - firstSeenDate) < newThresholdMs;
@@ -2069,6 +2120,9 @@ class RegistrationManager {
           .map(event => {
           const eventKey = event.eventId || event.url;
           const eventUrl = event.url;
+          // Normalize URL for comparison with Google Sheets data
+          // Google Sheets returns normalized URLs (just slugs like "h7i66r2z")
+          const normalizedUrl = normalizeEventUrl(eventUrl);
           
           // Determine registration status
           let isRegistered = false;
@@ -2077,18 +2131,19 @@ class RegistrationManager {
           let firstSeenDate = null;
           
           if (useGoogleSheets) {
-            // Use Google Sheets data - check by URL
-            isRegistered = myRegistrations.includes(eventUrl);
-            isNew = !seenEvents.includes(eventUrl); // Never seen before = truly new
+            // Use Google Sheets data - check by NORMALIZED URL
+            // This allows matching "luma.com/x" with "lu.ma/x"
+            isRegistered = myRegistrations.includes(normalizedUrl);
+            isNew = !seenEvents.includes(normalizedUrl); // Never seen before = truly new
             
             // Check if team registered but current user hasn't
-            if (teamRegistrations[eventUrl]) {
-              teamRegistered = teamRegistrations[eventUrl];
+            if (teamRegistrations[normalizedUrl]) {
+              teamRegistered = teamRegistrations[normalizedUrl];
             }
             
             // Get first seen date if available
-            if (firstSeenDates[eventUrl]) {
-              firstSeenDate = firstSeenDates[eventUrl];
+            if (firstSeenDates[normalizedUrl]) {
+              firstSeenDate = firstSeenDates[normalizedUrl];
             }
           } else {
             // Use local storage
@@ -2635,7 +2690,9 @@ class RegistrationManager {
       const newThresholdMs = 48 * 60 * 60 * 1000; // 48 hours
       
       const isRecentlyFirstSeen = (url) => {
-        const firstSeen = firstSeenDates[url];
+        // Use normalized URL to look up first seen date
+        const normalizedUrl = normalizeEventUrl(url);
+        const firstSeen = firstSeenDates[normalizedUrl];
         if (!firstSeen || !firstSeen.date) return false;
         const firstSeenDate = new Date(firstSeen.date);
         return (now - firstSeenDate) < newThresholdMs;
@@ -2645,6 +2702,9 @@ class RegistrationManager {
       const formattedEvents = scrapedEvents.map(event => {
         const eventKey = event.eventId || event.url;
         const eventUrl = event.url;
+        // Normalize URL for comparison with Google Sheets data
+        // Google Sheets returns normalized URLs (just slugs like "h7i66r2z")
+        const normalizedUrl = normalizeEventUrl(eventUrl);
         
         // Determine registration status
         let isRegistered = false;
@@ -2653,18 +2713,19 @@ class RegistrationManager {
         let firstSeenDate = null;
         
         if (useGoogleSheets) {
-          // Use Google Sheets data - check by URL
-          isRegistered = myRegistrations.includes(eventUrl);
-          isNew = !seenEvents.includes(eventUrl);
+          // Use Google Sheets data - check by NORMALIZED URL
+          // This allows matching "luma.com/x" with "lu.ma/x"
+          isRegistered = myRegistrations.includes(normalizedUrl);
+          isNew = !seenEvents.includes(normalizedUrl);
           
           // Check if team registered but current user hasn't
-          if (teamRegistrations[eventUrl]) {
-            teamRegistered = teamRegistrations[eventUrl];
+          if (teamRegistrations[normalizedUrl]) {
+            teamRegistered = teamRegistrations[normalizedUrl];
           }
           
           // Get first seen date if available
-          if (firstSeenDates[eventUrl]) {
-            firstSeenDate = firstSeenDates[eventUrl];
+          if (firstSeenDates[normalizedUrl]) {
+            firstSeenDate = firstSeenDates[normalizedUrl];
           }
         } else {
           // Use local storage
@@ -3189,15 +3250,17 @@ class RegistrationManager {
       const formattedEvents = scrapedEvents.map(event => {
         const eventKey = event.eventId || event.url;
         const eventUrl = event.url;
+        // Normalize URL for comparison with Google Sheets data
+        const normalizedUrl = normalizeEventUrl(eventUrl);
         
         // Determine registration status
         let isRegistered;
         let isNew = false;
         
         if (useGoogleSheets) {
-          // Use Google Sheets data - check by URL
-          isRegistered = myRegistrations.includes(eventUrl);
-          isNew = !seenEvents.includes(eventUrl);
+          // Use Google Sheets data - check by NORMALIZED URL
+          isRegistered = myRegistrations.includes(normalizedUrl);
+          isNew = !seenEvents.includes(normalizedUrl);
         } else {
           // Use local storage
           isRegistered = !!registeredEvents[eventKey];

@@ -24,6 +24,54 @@
 // Headers for registration sheets
 const HEADERS = ['event_url', 'title', 'event_date', 'person_email', 'person_name', 'calendar', 'registered_at'];
 
+/**
+ * Normalize a Luma event URL to a consistent format for comparison
+ * Handles both lu.ma and luma.com domains
+ * 
+ * Examples:
+ * - "https://lu.ma/h7i66r2z" -> "h7i66r2z"
+ * - "https://luma.com/h7i66r2z" -> "h7i66r2z"
+ * - "https://lu.ma/h7i66r2z?ref=abc" -> "h7i66r2z"
+ * - "h7i66r2z" -> "h7i66r2z" (already just a slug)
+ */
+function normalizeEventUrl(url) {
+  if (!url) return '';
+  
+  url = String(url).trim();
+  
+  // If it's already just a slug (no slashes), return as-is
+  if (!url.includes('/') && !url.includes('.')) {
+    return url.toLowerCase();
+  }
+  
+  // Try to extract slug from various URL formats
+  // Match: lu.ma/SLUG, luma.com/SLUG, or just /SLUG
+  const match = url.match(/(?:lu\.ma|luma\.com)\/([a-zA-Z0-9_-]+)(?:[?#]|$)/i);
+  if (match) {
+    return match[1].toLowerCase();
+  }
+  
+  // Fallback: try to get the last path segment
+  try {
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/').filter(p => p);
+    if (pathParts.length > 0) {
+      // Return the last path segment, removing any query/hash
+      return pathParts[pathParts.length - 1].toLowerCase();
+    }
+  } catch (e) {
+    // URL parsing failed, try simple extraction
+    const simplePath = url.split('?')[0].split('#')[0];
+    const parts = simplePath.split('/').filter(p => p);
+    if (parts.length > 0) {
+      return parts[parts.length - 1].toLowerCase();
+    }
+  }
+  
+  // Return original URL lowercased as last resort
+  return url.toLowerCase();
+}
+
 // Headers for SeenEvents sheet (tracks when events were first discovered)
 const SEEN_EVENTS_HEADERS = ['event_url', 'title', 'event_date', 'calendar', 'first_seen_date', 'first_seen_by'];
 const SEEN_EVENTS_SHEET_NAME = '_SeenEvents'; // Underscore prefix = internal sheet
@@ -172,6 +220,7 @@ function getCalendars() {
 
 // Get seen events and registrations for a specific email
 // Returns: seenEvents (all URLs), myRegistrations (this user's), teamRegistrations (others'), firstSeenDates
+// NOTE: All URLs are NORMALIZED (just the slug) for consistent matching across lu.ma and luma.com domains
 function getScanStatus(email, calendar) {
   if (!email) {
     return { error: 'Email is required' };
@@ -180,8 +229,8 @@ function getScanStatus(email, calendar) {
   const ss = getSpreadsheet();
   const seenEvents = new Set();
   const myRegistrations = new Set();
-  const teamRegistrations = {}; // { eventUrl: [emails who registered] }
-  const firstSeenDates = {}; // { eventUrl: { date, by } }
+  const teamRegistrations = {}; // { normalizedUrl: [emails who registered] }
+  const firstSeenDates = {}; // { normalizedUrl: { date, by } }
   
   // First, get first_seen data from SeenEvents sheet
   try {
@@ -201,8 +250,10 @@ function getScanStatus(email, calendar) {
           if (calendar && eventCalendar !== calendar) continue;
           
           if (eventUrl) {
-            seenEvents.add(eventUrl);
-            firstSeenDates[eventUrl] = {
+            // Normalize URL for consistent matching
+            const normalizedUrl = normalizeEventUrl(eventUrl);
+            seenEvents.add(normalizedUrl);
+            firstSeenDates[normalizedUrl] = {
               date: firstSeenDate,
               by: firstSeenBy
             };
@@ -236,21 +287,23 @@ function getScanStatus(email, calendar) {
           if (calendar && eventCalendar !== calendar) continue;
           
           if (eventUrl) {
-            seenEvents.add(eventUrl);
+            // Normalize URL for consistent matching
+            const normalizedUrl = normalizeEventUrl(eventUrl);
+            seenEvents.add(normalizedUrl);
             
             if (personEmail) {
-              // Track who registered for this event
-              if (!teamRegistrations[eventUrl]) {
-                teamRegistrations[eventUrl] = [];
+              // Track who registered for this event (using normalized URL as key)
+              if (!teamRegistrations[normalizedUrl]) {
+                teamRegistrations[normalizedUrl] = [];
               }
               
               // Add registration info (avoid duplicates by checking email)
-              const alreadyAdded = teamRegistrations[eventUrl].some(
+              const alreadyAdded = teamRegistrations[normalizedUrl].some(
                 r => r.email.toLowerCase() === personEmail.toLowerCase()
               );
               
               if (!alreadyAdded) {
-                teamRegistrations[eventUrl].push({
+                teamRegistrations[normalizedUrl].push({
                   email: personEmail,
                   registeredAt: registeredAt
                 });
@@ -258,7 +311,7 @@ function getScanStatus(email, calendar) {
               
               // Check if this is the current user
               if (personEmail.toLowerCase() === email.toLowerCase()) {
-                myRegistrations.add(eventUrl);
+                myRegistrations.add(normalizedUrl);
               }
             }
           }
@@ -269,10 +322,10 @@ function getScanStatus(email, calendar) {
   
   // Filter teamRegistrations to only include events where current user hasn't registered
   const teamOnlyRegistrations = {};
-  for (const [url, registrations] of Object.entries(teamRegistrations)) {
-    if (!myRegistrations.has(url)) {
+  for (const [normalizedUrl, registrations] of Object.entries(teamRegistrations)) {
+    if (!myRegistrations.has(normalizedUrl)) {
       // Current user hasn't registered - this is a "team registered, you haven't" event
-      teamOnlyRegistrations[url] = registrations;
+      teamOnlyRegistrations[normalizedUrl] = registrations;
     }
   }
   
@@ -294,32 +347,41 @@ function recordSeenEvents(events, calendar, scannedBy) {
   const now = new Date().toISOString();
   const calendarName = calendar || 'default';
   
-  // Get existing URLs to avoid duplicates
+  // Get existing URLs to avoid duplicates (normalized for comparison)
   const lastRow = sheet.getLastRow();
-  const existingUrls = new Set();
+  const existingNormalizedUrls = new Set();
   
   if (lastRow > 1) {
     const existingData = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
     for (const row of existingData) {
-      if (row[0]) existingUrls.add(row[0]);
+      if (row[0]) {
+        // Normalize existing URLs for consistent comparison
+        existingNormalizedUrls.add(normalizeEventUrl(row[0]));
+      }
     }
   }
   
   // Add new events
   let newCount = 0;
   const newRows = [];
+  const addedNormalized = new Set(); // Track what we're adding to avoid duplicates within batch
   
   for (const event of events) {
-    if (event.url && !existingUrls.has(event.url)) {
-      newRows.push([
-        event.url,
-        event.title || '',
-        event.date || '',
-        calendarName,
-        now,
-        scannedBy || ''
-      ]);
-      newCount++;
+    if (event.url) {
+      const normalizedUrl = normalizeEventUrl(event.url);
+      // Check against existing AND what we're about to add
+      if (!existingNormalizedUrls.has(normalizedUrl) && !addedNormalized.has(normalizedUrl)) {
+        newRows.push([
+          event.url, // Store original URL
+          event.title || '',
+          event.date || '',
+          calendarName,
+          now,
+          scannedBy || ''
+        ]);
+        addedNormalized.add(normalizedUrl);
+        newCount++;
+      }
     }
   }
   
@@ -345,18 +407,20 @@ function addRegistration(reg) {
   
   const calendarName = reg.calendar || 'default';
   const now = new Date().toISOString();
+  const normalizedEventUrl = normalizeEventUrl(reg.event_url);
   
   // Get or create the calendar-specific sheet
   const calendarSheet = getOrCreateSheet(calendarName);
   
-  // Check for duplicates in this calendar
+  // Check for duplicates in this calendar (using normalized URL comparison)
   const lastRow = calendarSheet.getLastRow();
   if (lastRow > 1) {
     const existingData = calendarSheet.getRange(2, 1, lastRow - 1, 4).getValues();
     for (const row of existingData) {
-      if (row[0] === reg.event_url && 
+      const existingNormalized = normalizeEventUrl(row[0]);
+      if (existingNormalized === normalizedEventUrl && 
           row[3] && row[3].toLowerCase() === reg.person_email.toLowerCase()) {
-        console.log('Duplicate found, skipping:', reg.event_url, reg.person_email);
+        console.log('Duplicate found (normalized match), skipping:', reg.event_url, reg.person_email);
         return { added: false, reason: 'duplicate' };
       }
     }
@@ -364,7 +428,7 @@ function addRegistration(reg) {
   
   // Add to calendar-specific sheet
   const newRow = [
-    reg.event_url,
+    reg.event_url, // Store original URL
     reg.title || '',
     reg.event_date || '',
     reg.person_email,
@@ -379,14 +443,15 @@ function addRegistration(reg) {
   // Also add to Master sheet for overview
   const masterSheet = getOrCreateSheet('Master');
   
-  // Check for duplicates in Master (shouldn't happen, but just in case)
+  // Check for duplicates in Master using normalized URL
   const masterLastRow = masterSheet.getLastRow();
   let isDuplicateInMaster = false;
   
   if (masterLastRow > 1) {
     const masterData = masterSheet.getRange(2, 1, masterLastRow - 1, 4).getValues();
     for (const row of masterData) {
-      if (row[0] === reg.event_url && 
+      const existingNormalized = normalizeEventUrl(row[0]);
+      if (existingNormalized === normalizedEventUrl && 
           row[3] && row[3].toLowerCase() === reg.person_email.toLowerCase()) {
         isDuplicateInMaster = true;
         break;
