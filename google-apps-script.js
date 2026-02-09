@@ -320,19 +320,24 @@ function getScanStatus(email, calendar) {
     }
   }
   
-  // Filter teamRegistrations to only include events where current user hasn't registered
-  const teamOnlyRegistrations = {};
+  // Build team registrations - include ALL events where teammates registered
+  // But exclude the current user from the registrations list (we don't need to show "you" as a teammate)
+  const allTeamRegistrations = {};
   for (const [normalizedUrl, registrations] of Object.entries(teamRegistrations)) {
-    if (!myRegistrations.has(normalizedUrl)) {
-      // Current user hasn't registered - this is a "team registered, you haven't" event
-      teamOnlyRegistrations[normalizedUrl] = registrations;
+    // Filter out the current user from the list of registrants
+    const teammatesOnly = registrations.filter(
+      r => r.email.toLowerCase() !== email.toLowerCase()
+    );
+    // Only include if there are teammates who registered (not just the current user)
+    if (teammatesOnly.length > 0) {
+      allTeamRegistrations[normalizedUrl] = teammatesOnly;
     }
   }
   
   return {
     seenEvents: Array.from(seenEvents),
     myRegistrations: Array.from(myRegistrations),
-    teamRegistrations: teamOnlyRegistrations, // Events where team registered but current user hasn't
+    teamRegistrations: allTeamRegistrations, // ALL events where teammates registered (excluding current user from list)
     firstSeenDates: firstSeenDates
   };
 }

@@ -2162,7 +2162,8 @@ class RegistrationManager {
             isNew: isNew,
             teamRegistered: teamRegistered, // Array of { email, registeredAt } or null
             firstSeenDate: firstSeenDate, // { date, by } or null
-            isRecentlyAdded: isNew || isRecentlyFirstSeen(eventUrl) // For UI highlighting
+            isRecentlyAdded: isNew || isRecentlyFirstSeen(eventUrl), // For UI highlighting
+            _debug_normalizedUrl: normalizedUrl // For debugging
           };
         });
 
@@ -2187,7 +2188,6 @@ class RegistrationManager {
         const newCount = formattedEvents.filter(e => e.isNew).length;
         const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
         const teamRegisteredCount = formattedEvents.filter(e => e.teamRegistered && !e.isRegistered).length;
-        const availableCount = formattedEvents.filter(e => !e.isRegistered).length;
 
         // Send results back to popup
         try {
@@ -2767,7 +2767,7 @@ class RegistrationManager {
       // Count stats
       const newCount = formattedEvents.filter(e => e.isNew).length;
       const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
-      const teamRegisteredCount = formattedEvents.filter(e => e.teamRegistered && !e.isRegistered).length;
+      const teamRegisteredCount = formattedEvents.filter(e => e.teamRegistered).length; // Count ALL team registrations
 
       // Send results back to popup
       try {
@@ -4522,15 +4522,9 @@ class RegistrationManager {
                           if (url.indexOf('/event/register') > -1) {
                             response.clone().json().then(function (data) {
                               try {
-                                // #region agent log
-                                fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:network',message:'H3: Luma /event/register response',data:{dataStatus:data?data.status:'null',approvalStatus:data?data.approval_status:'null',hasData:!!data},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
-                                // #endregion
                                 if (data && (data.status === 'success' || data.approval_status === 'approved')) {
                                   window.__eventAutoRegisterNetworkSuccessFlag = true;
                                   console.log('[Event Auto Register] ✓ Network registration success detected (Luma /event/register)');
-                                  // #region agent log
-                                  fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:network-success',message:'H3: Network flag SET to TRUE',data:{url:url},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
-                                  // #endregion
                                 }
                               } catch (e) { }
                             }).catch(function () { });
@@ -14293,9 +14287,6 @@ class RegistrationManager {
                               // This handles the race condition where API response comes in fast
                               if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
                                 console.log('[Event Auto Register] ✓ Network success flag already TRUE - immediate success!');
-                                // #region agent log
-                                fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:12896-immediate',message:'H3: Network flag TRUE - immediate success',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
-                                // #endregion
                                 resolve({ success: true, message: 'Registered successfully (network confirmed)' });
                                 return;
                               }
@@ -14667,10 +14658,6 @@ class RegistrationManager {
                                 success = true;
                               }
 
-                              // #region agent log
-                              fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:13262',message:'H2/H3/H4: Final success check result',data:{success:success,foundPhrase:foundPhrase,hasValidationErrors:hasValidationErrors,networkFlag:!!(typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag),fieldsToFillCount:fieldsToFill.length,pageTextSample:(bodyText||'').substring(0,200)},timestamp:Date.now(),hypothesisId:'H2,H3,H4'})}).catch(function(){});
-                              // #endregion
-
                               if (success) {
                                 console.log('[Event Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
                                 var message = 'Registered successfully';
@@ -14786,9 +14773,6 @@ class RegistrationManager {
                           // FIX H3: IMMEDIATELY check network flag FIRST before anything else
                           if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
                             console.log('[Event Auto Register] ✓ Network success flag already TRUE - immediate success!');
-                            // #region agent log
-                            fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:13377-immediate',message:'H3: Network flag TRUE - immediate success',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
-                            // #endregion
                             resolve({ success: true, message: 'Registered successfully (network confirmed)' });
                             return;
                           }
@@ -14816,9 +14800,6 @@ class RegistrationManager {
                           waitForNetworkFirst(function(networkSuccessEarly) {
                           // If network success was detected during wait, immediately return success
                           if (networkSuccessEarly) {
-                            // #region agent log
-                            fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:waitForNetwork-success',message:'H3: Network flag detected during wait - success',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
-                            // #endregion
                             resolve({ success: true, message: 'Registered successfully (network confirmed)' });
                             return;
                           }
@@ -14827,14 +14808,6 @@ class RegistrationManager {
                           var errorMessages = document.querySelectorAll('*');
                           var hasValidationErrors = false;
                           var missingFields = [];
-                          // #region agent log
-                          var errorElsDebug = [];
-                          for (var ve = 0; ve < validationErrors.length && ve < 5; ve++) {
-                            var errTextTrim = (validationErrors[ve].textContent || '').trim();
-                            errorElsDebug.push({tagName: validationErrors[ve].tagName, className: validationErrors[ve].className, text: errTextTrim.substring(0, 50), isEmpty: errTextTrim.length === 0});
-                          }
-                          fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:13378',message:'H2: Error elements found by selector',data:{count:validationErrors.length,samples:errorElsDebug,networkSuccessEarly:networkSuccessEarly},timestamp:Date.now(),hypothesisId:'H2'})}).catch(function(){});
-                          // #endregion
 
                           // FIX H2: Only count validation errors if they have ACTUAL error text content
                           // Empty error placeholder divs (like Luma's "text-error" divs) should be ignored
@@ -15248,9 +15221,6 @@ class RegistrationManager {
             }
           } else {
             // No Cloudflare, timeout reached
-            // #region agent log
-            fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:13801',message:'H1: TIMEOUT reached (no Cloudflare) - marking as FAILED',data:{eventTitle:event.title,timeoutMs:REGISTRATION_TIMEOUT},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-            // #endregion
             event.status = 'failed';
             event.message = `Registration timed out after ${REGISTRATION_TIMEOUT / 1000} seconds`;
             this.stats.failed++;
@@ -15260,9 +15230,6 @@ class RegistrationManager {
           }
         } else {
           // Registration completed before timeout - use the result
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:13811',message:'H1: Registration completed BEFORE timeout',data:{eventTitle:event.title,resultSuccess:raceResult && raceResult[0] && raceResult[0].result ? raceResult[0].result.success : 'unknown'},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-          // #endregion
           result = raceResult;
         }
       } catch (error) {
