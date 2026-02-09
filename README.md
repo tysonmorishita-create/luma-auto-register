@@ -16,6 +16,7 @@ Automatically register for multiple Luma events from calendar pages. Perfect for
 - 🗄️ **Google Sheets Database**: Track registrations in a shared spreadsheet for team coordination
 - 👥 **Multi-Person Support**: Each team member's registrations tracked separately by email
 - 📅 **Per-Calendar Organization**: Automatic tabs for each calendar/conference (CHK2026, ethdenver, etc.)
+- 🤖 **Cloudflare/Turnstile Bypass**: Automatic human-like click simulation to bypass CAPTCHA challenges
 
 ## Prerequisites
 
@@ -298,6 +299,13 @@ For 100+ events:
 - Increase delay between batches to 10-15 seconds
 - Take longer breaks between batches
 
+**Cloudflare/Turnstile CAPTCHA:**
+- The extension automatically attempts to bypass Turnstile "Verify you are human" challenges
+- Uses Chrome Debugger API to send trusted mouse events with human-like Bezier curve movement
+- If auto-bypass fails, you have 2 minutes to manually click the checkbox
+- VPN usage often triggers more aggressive CAPTCHAs - try disabling VPN if challenges persist
+- The extension will retry bypass attempts up to 5 times with 8-second intervals
+
 ## Limitations
 
 1. **Must be logged in**: Extension cannot log you in automatically
@@ -343,7 +351,8 @@ luma-auto-register/
 - `tabs`: Create and manage registration tabs
 - `storage`: Save queue and results locally
 - `scripting`: Inject code to interact with Luma pages
-- `host_permissions`: Access lu.ma and luma.com domains
+- `debugger`: Send trusted mouse events for CAPTCHA bypass
+- `host_permissions`: Access lu.ma, luma.com, and challenges.cloudflare.com domains
 
 ## Development
 
@@ -370,6 +379,15 @@ Key areas to customize:
 - **Detection patterns**: Update button text searches in `content.js`
 
 ## Changelog
+
+### Version 2.1.0 (Turnstile Bypass)
+- **Cloudflare/Turnstile Bypass**: Automatic human-like click simulation to bypass CAPTCHA challenges
+- Uses Chrome Debugger API for trusted mouse events (indistinguishable from real user input)
+- Bezier curve mouse movement for natural-looking trajectories
+- Randomized timing, hover events, and click pressure for realism
+- Auto-retry up to 5 times with 8-second intervals
+- Falls back to 2-minute manual completion window if bypass fails
+- Improved success detection during verification challenges
 
 ### Version 2.0.0 (Team Edition)
 - **Google Sheets Database**: Shared tracking across team members
@@ -416,6 +434,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Last Updated:** February 6, 2026
+**Last Updated:** February 9, 2026
 
 Made with ❤️ for busy event-goers

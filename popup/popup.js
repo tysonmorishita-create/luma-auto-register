@@ -12,6 +12,7 @@ class PopupController {
     this.newCount = 0;
     this.registeredCount = 0;
     this.trulyNewCount = 0; // Events never seen before (Google Sheets only)
+    this.teamRegisteredCount = 0; // Events where team registered but current user hasn't
     this.availableCount = 0; // Events available to register
     this.init();
   }
@@ -45,6 +46,9 @@ class PopupController {
     this.exportDebugBtnMain = document.getElementById('exportDebugBtnMain');
     this.toggleRegisteredBtn = document.getElementById('toggleRegisteredBtn');
     this.moveToBottomBtn = document.getElementById('moveToBottomBtn');
+    this.recheckAllBtn = document.getElementById('recheckAllBtn');
+    this.failedEventsContainer = document.getElementById('failedEventsContainer');
+    this.failedEventsList = document.getElementById('failedEventsList');
 
     // Sections
     this.eventsSection = document.getElementById('eventsSection');
@@ -103,6 +107,9 @@ class PopupController {
     if (this.moveToBottomBtn) {
       this.moveToBottomBtn.addEventListener('click', () => this.toggleRegisteredAtBottom());
     }
+    if (this.recheckAllBtn) {
+      this.recheckAllBtn.addEventListener('click', () => this.recheckFailedTabs());
+    }
   }
 
   async loadState() {
@@ -125,7 +132,13 @@ class PopupController {
       } else if (message.type === 'LOG') {
         this.addLog(message.level, message.message);
       } else if (message.type === 'SCAN_COMPLETE') {
-        this.handleScanComplete(message.events, message.debug, message.newCount, message.registeredCount);
+        this.handleScanComplete(message.events, message.debug, message.newCount, message.registeredCount, message.teamRegisteredCount);
+      } else if (message.type === 'REGISTRATION_RESULT_UPDATE') {
+        // A failed/manual event was re-verified or manually marked as registered
+        this.handleResultUpdate(message.data);
+      } else if (message.type === 'RECHECK_COMPLETE') {
+        // Re-check of all failed tabs completed
+        this.handleRecheckComplete(message.data);
       }
     });
   }
@@ -178,11 +191,12 @@ class PopupController {
     });
   }
 
-  handleScanComplete(events, debugInfo, newCount, registeredCount) {
+  handleScanComplete(events, debugInfo, newCount, registeredCount, teamRegisteredCount) {
     this.events = events;
     this.newCount = newCount || events.filter(e => !e.isRegistered).length;
     this.registeredCount = registeredCount || events.filter(e => e.isRegistered).length;
     this.trulyNewCount = events.filter(e => e.isNew).length; // Events never seen before (Google Sheets only)
+    this.teamRegisteredCount = teamRegisteredCount || events.filter(e => e.teamRegistered && !e.isRegistered).length; // Team registered but not current user
     this.availableCount = events.filter(e => !e.isRegistered).length; // Events available to register
     this.state = 'ready';
     this.scanBtn.disabled = false;
@@ -208,14 +222,14 @@ class PopupController {
 
     // Build status message based on what data we have
     let statusMsg;
-    if (this.trulyNewCount > 0) {
-      // Google Sheets is active - show truly new events
-      statusMsg = `Found ${this.trulyNewCount} NEW events`;
-      if (this.availableCount > this.trulyNewCount) {
-        statusMsg += `, ${this.availableCount - this.trulyNewCount} available`;
-      }
+    if (this.trulyNewCount > 0 || this.teamRegisteredCount > 0) {
+      // Google Sheets is active - show truly new events and team registrations
+      const parts = [];
+      if (this.trulyNewCount > 0) parts.push(`${this.trulyNewCount} 🆕 NEW`);
+      if (this.teamRegisteredCount > 0) parts.push(`${this.teamRegisteredCount} ⚡ team registered`);
+      statusMsg = `Found ${parts.join(', ')}`;
       if (this.registeredCount > 0) {
-        statusMsg += `, ${this.registeredCount} already registered`;
+        statusMsg += `, ${this.registeredCount} ✅ you registered`;
       }
     } else if (this.registeredCount > 0) {
       statusMsg = `Found ${this.availableCount} new events, ${this.registeredCount} already registered`;
@@ -392,6 +406,7 @@ class PopupController {
       let itemClass = 'event-item';
       if (event.isRegistered) itemClass += ' registered';
       if (event.isNew) itemClass += ' new-event';
+      if (event.teamRegistered && !event.isRegistered) itemClass += ' team-registered';
       item.className = itemClass;
       
       // Build the display title with optional date prefix
@@ -399,10 +414,17 @@ class PopupController {
       const registeredBadge = event.isRegistered ? '<span class="registered-badge">✓ Registered</span>' : '';
       const newBadge = event.isNew && !event.isRegistered ? '<span class="new-badge">🆕 NEW</span>' : '';
       
+      // Team registered badge - show who registered
+      let teamBadge = '';
+      if (event.teamRegistered && !event.isRegistered) {
+        const teamEmails = event.teamRegistered.map(r => r.email.split('@')[0]).join(', ');
+        teamBadge = `<span class="team-badge" title="Registered by: ${event.teamRegistered.map(r => r.email).join(', ')}">⚡ ${teamEmails}</span>`;
+      }
+      
       item.innerHTML = `
         <input type="checkbox" id="event-${originalIndex}" ${event.selected ? 'checked' : ''}>
         <label for="event-${originalIndex}" class="event-title" title="${event.title}">${datePrefix}${event.title}</label>
-        ${newBadge}${registeredBadge}
+        ${newBadge}${teamBadge}${registeredBadge}
       `;
       
       const checkbox = item.querySelector('input');
@@ -437,17 +459,19 @@ class PopupController {
     
     const hasNewEvents = this.trulyNewCount > 0 || this.availableCount > 0;
     
-    if (this.registeredCount > 0 || this.trulyNewCount > 0) {
+    if (this.registeredCount > 0 || this.trulyNewCount > 0 || this.teamRegisteredCount > 0) {
       this.eventsSummary.style.display = 'flex';
       
-      if (this.trulyNewCount > 0) {
-        // Google Sheets mode - show truly new events
-        let summaryParts = [`🆕 ${this.trulyNewCount} NEW`];
-        if (this.availableCount > this.trulyNewCount) {
-          summaryParts.push(`${this.availableCount - this.trulyNewCount} available`);
+      if (this.trulyNewCount > 0 || this.teamRegisteredCount > 0) {
+        // Google Sheets mode - show truly new events and team registrations
+        let summaryParts = [];
+        if (this.trulyNewCount > 0) summaryParts.push(`🆕 ${this.trulyNewCount} NEW`);
+        if (this.teamRegisteredCount > 0) summaryParts.push(`⚡ ${this.teamRegisteredCount} team registered`);
+        if (this.availableCount > this.trulyNewCount + this.teamRegisteredCount) {
+          summaryParts.push(`${this.availableCount - this.trulyNewCount - this.teamRegisteredCount} other`);
         }
         if (this.registeredCount > 0) {
-          summaryParts.push(`✓ ${this.registeredCount} registered`);
+          summaryParts.push(`✓ ${this.registeredCount} you registered`);
         }
         this.summaryText.textContent = summaryParts.join(', ');
         this.summaryText.className = 'summary-text';
@@ -572,6 +596,10 @@ class PopupController {
       this.state = 'complete';
       this.updateUIForState();
       this.addLog('success', `Registration complete! ${success} succeeded, ${failed} failed`);
+      // Render failed events list if there are any failures
+      if (failed > 0) {
+        this.renderFailedEvents();
+      }
     }
   }
 
@@ -737,6 +765,181 @@ class PopupController {
   clearDebug() {
     this.debugContainer.innerHTML = '';
     this.addLog('info', 'Debug console cleared');
+  }
+
+  // Render failed/manual events list with action buttons
+  async renderFailedEvents() {
+    if (!this.failedEventsList || !this.failedEventsContainer) return;
+    
+    // Get results from storage
+    const result = await chrome.storage.local.get(['results']);
+    const results = result.results || [];
+    
+    // Filter for failed and manual events
+    const failedEvents = results.filter(r => r.status === 'failed' || r.status === 'manual');
+    
+    if (failedEvents.length === 0) {
+      this.failedEventsContainer.style.display = 'none';
+      return;
+    }
+    
+    this.failedEventsContainer.style.display = 'block';
+    this.failedEventsList.innerHTML = '';
+    
+    failedEvents.forEach((event, index) => {
+      const item = document.createElement('div');
+      item.className = `failed-event-item ${event.status === 'manual' ? 'manual' : ''}`;
+      item.dataset.url = event.url;
+      item.dataset.tabId = event.tabId || '';
+      
+      const statusIcon = event.status === 'manual' ? '⚠️' : '❌';
+      const statusText = event.status === 'manual' ? 'Manual review needed' : event.message || 'Failed';
+      
+      item.innerHTML = `
+        <div class="failed-event-info">
+          <div class="failed-event-title" title="${event.title}">${statusIcon} ${event.title}</div>
+          <div class="failed-event-status">${statusText}</div>
+        </div>
+        <div class="failed-event-actions">
+          ${event.tabId ? `<button class="btn-recheck-single" data-url="${event.url}" data-tab-id="${event.tabId}" title="Re-check this tab for registration success">🔄</button>` : ''}
+          <button class="btn-mark-registered" data-url="${event.url}" data-tab-id="${event.tabId || ''}" title="Manually mark as registered">✓ Mark Done</button>
+        </div>
+      `;
+      
+      this.failedEventsList.appendChild(item);
+    });
+    
+    // Add event listeners for action buttons
+    this.failedEventsList.querySelectorAll('.btn-recheck-single').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const url = e.target.dataset.url;
+        const tabId = parseInt(e.target.dataset.tabId);
+        this.recheckSingleTab(url, tabId);
+      });
+    });
+    
+    this.failedEventsList.querySelectorAll('.btn-mark-registered').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const url = e.target.dataset.url;
+        const tabId = e.target.dataset.tabId ? parseInt(e.target.dataset.tabId) : null;
+        this.markAsRegistered(url, tabId);
+      });
+    });
+  }
+  
+  // Re-check all failed tabs
+  async recheckFailedTabs() {
+    if (this.recheckAllBtn) {
+      this.recheckAllBtn.disabled = true;
+      this.recheckAllBtn.textContent = '🔄 Checking...';
+    }
+    
+    this.addLog('info', 'Re-checking all failed/manual tabs...');
+    
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'RECHECK_FAILED_TABS' });
+      
+      if (response && response.success) {
+        this.addLog('success', `Re-check complete: ${response.updated} of ${response.total} events updated to success`);
+      } else {
+        this.addLog('error', `Re-check failed: ${response?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      this.addLog('error', `Re-check error: ${error.message}`);
+    } finally {
+      if (this.recheckAllBtn) {
+        this.recheckAllBtn.disabled = false;
+        this.recheckAllBtn.textContent = '🔄 Re-check All Tabs';
+      }
+      // Refresh the failed events list
+      await this.renderFailedEvents();
+    }
+  }
+  
+  // Re-check a single tab
+  async recheckSingleTab(url, tabId) {
+    this.addLog('info', `Re-checking tab for: ${url.substring(0, 50)}...`);
+    
+    try {
+      const response = await chrome.runtime.sendMessage({ 
+        type: 'RECHECK_SINGLE_TAB', 
+        url: url,
+        tabId: tabId
+      });
+      
+      if (response && response.success) {
+        if (response.updated) {
+          this.addLog('success', `✓ Registration confirmed for: ${response.title}`);
+        } else {
+          this.addLog('info', `Still not registered: ${response.title}`);
+        }
+      } else {
+        this.addLog('error', `Re-check failed: ${response?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      this.addLog('error', `Re-check error: ${error.message}`);
+    }
+    
+    // Refresh the failed events list
+    await this.renderFailedEvents();
+  }
+  
+  // Manually mark an event as registered
+  async markAsRegistered(url, tabId) {
+    this.addLog('info', `Marking as registered: ${url.substring(0, 50)}...`);
+    
+    try {
+      const response = await chrome.runtime.sendMessage({ 
+        type: 'MARK_AS_REGISTERED', 
+        url: url,
+        tabId: tabId
+      });
+      
+      if (response && response.success) {
+        this.addLog('success', `✓ Marked as registered: ${response.title}`);
+        // Update counts
+        if (this.successCount) {
+          this.successCount.textContent = parseInt(this.successCount.textContent) + 1;
+        }
+        if (this.failedCount && parseInt(this.failedCount.textContent) > 0) {
+          this.failedCount.textContent = parseInt(this.failedCount.textContent) - 1;
+        }
+      } else {
+        this.addLog('error', `Mark failed: ${response?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      this.addLog('error', `Mark error: ${error.message}`);
+    }
+    
+    // Refresh the failed events list
+    await this.renderFailedEvents();
+  }
+  
+  // Handle result update from background
+  handleResultUpdate(data) {
+    this.addLog('success', `✓ Registration verified: ${data.title}`);
+    // Update counts
+    if (data.reverified || data.manuallyMarked) {
+      if (this.successCount) {
+        this.successCount.textContent = parseInt(this.successCount.textContent) + 1;
+      }
+      if (this.failedCount && parseInt(this.failedCount.textContent) > 0) {
+        this.failedCount.textContent = parseInt(this.failedCount.textContent) - 1;
+      }
+    }
+    // Refresh failed events list
+    this.renderFailedEvents();
+  }
+  
+  // Handle re-check complete from background
+  handleRecheckComplete(data) {
+    if (data.updated > 0) {
+      this.addLog('success', `Re-check complete: ${data.updated} of ${data.total} events confirmed as registered`);
+    } else {
+      this.addLog('info', `Re-check complete: No changes - ${data.total} events still need attention`);
+    }
+    // Refresh failed events list
+    this.renderFailedEvents();
   }
 
   async exportDebugLogs() {

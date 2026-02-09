@@ -24,6 +24,10 @@
 // Headers for registration sheets
 const HEADERS = ['event_url', 'title', 'event_date', 'person_email', 'person_name', 'calendar', 'registered_at'];
 
+// Headers for SeenEvents sheet (tracks when events were first discovered)
+const SEEN_EVENTS_HEADERS = ['event_url', 'title', 'event_date', 'calendar', 'first_seen_date', 'first_seen_by'];
+const SEEN_EVENTS_SHEET_NAME = '_SeenEvents'; // Underscore prefix = internal sheet
+
 // Get the active spreadsheet (the one this script is bound to)
 // Or specify a spreadsheet ID if using a standalone script
 function getSpreadsheet() {
@@ -71,6 +75,35 @@ function getOrCreateSheet(sheetName) {
   return sheet;
 }
 
+// Get or create the SeenEvents sheet
+function getSeenEventsSheet() {
+  const ss = getSpreadsheet();
+  let sheet = ss.getSheetByName(SEEN_EVENTS_SHEET_NAME);
+  
+  if (!sheet) {
+    sheet = ss.insertSheet(SEEN_EVENTS_SHEET_NAME);
+    sheet.appendRow(SEEN_EVENTS_HEADERS);
+    
+    // Format header row
+    const headerRange = sheet.getRange(1, 1, 1, SEEN_EVENTS_HEADERS.length);
+    headerRange.setFontWeight('bold');
+    headerRange.setBackground('#34a853'); // Green for seen events
+    headerRange.setFontColor('white');
+    
+    sheet.setFrozenRows(1);
+    sheet.setColumnWidth(1, 300); // event_url
+    sheet.setColumnWidth(2, 250); // title
+    sheet.setColumnWidth(3, 120); // event_date
+    sheet.setColumnWidth(4, 100); // calendar
+    sheet.setColumnWidth(5, 150); // first_seen_date
+    sheet.setColumnWidth(6, 200); // first_seen_by
+    
+    console.log('Created SeenEvents sheet');
+  }
+  
+  return sheet;
+}
+
 // Main entry point for GET requests
 function doGet(e) {
   return handleRequest(e);
@@ -93,6 +126,10 @@ function handleRequest(e) {
       case 'addRegistration':
         const regData = JSON.parse(e.parameter.registration);
         return jsonResponse(addRegistration(regData));
+      
+      case 'recordSeenEvents':
+        const seenData = JSON.parse(e.parameter.events);
+        return jsonResponse(recordSeenEvents(seenData, e.parameter.calendar, e.parameter.scannedBy));
       
       case 'getAllData':
         return jsonResponse(getAllData(e.parameter.calendar));
@@ -134,7 +171,7 @@ function getCalendars() {
 }
 
 // Get seen events and registrations for a specific email
-// Optionally filtered by calendar
+// Returns: seenEvents (all URLs), myRegistrations (this user's), teamRegistrations (others'), firstSeenDates
 function getScanStatus(email, calendar) {
   if (!email) {
     return { error: 'Email is required' };
@@ -143,53 +180,160 @@ function getScanStatus(email, calendar) {
   const ss = getSpreadsheet();
   const seenEvents = new Set();
   const myRegistrations = new Set();
+  const teamRegistrations = {}; // { eventUrl: [emails who registered] }
+  const firstSeenDates = {}; // { eventUrl: { date, by } }
   
-  // Determine which sheets to check
-  let sheetsToCheck = [];
-  
-  if (calendar) {
-    // Check specific calendar tab
-    const sheet = ss.getSheetByName(calendar);
-    if (sheet) {
-      sheetsToCheck.push(sheet);
+  // First, get first_seen data from SeenEvents sheet
+  try {
+    const seenSheet = ss.getSheetByName(SEEN_EVENTS_SHEET_NAME);
+    if (seenSheet) {
+      const lastRow = seenSheet.getLastRow();
+      if (lastRow > 1) {
+        // Columns: event_url, title, event_date, calendar, first_seen_date, first_seen_by
+        const seenData = seenSheet.getRange(2, 1, lastRow - 1, 6).getValues();
+        for (const row of seenData) {
+          const eventUrl = row[0];
+          const eventCalendar = row[3];
+          const firstSeenDate = row[4];
+          const firstSeenBy = row[5];
+          
+          // Filter by calendar if specified
+          if (calendar && eventCalendar !== calendar) continue;
+          
+          if (eventUrl) {
+            seenEvents.add(eventUrl);
+            firstSeenDates[eventUrl] = {
+              date: firstSeenDate,
+              by: firstSeenBy
+            };
+          }
+        }
+      }
     }
-  } else {
-    // Check all sheets
-    sheetsToCheck = ss.getSheets();
+  } catch (e) {
+    console.log('Error reading SeenEvents sheet:', e);
   }
   
-  for (const sheet of sheetsToCheck) {
-    const sheetName = sheet.getName();
-    
-    // Skip sheets that don't have our data structure
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) continue; // Skip empty sheets (only header)
-    
-    // Check if this sheet has our headers
-    const firstRow = sheet.getRange(1, 1, 1, 4).getValues()[0];
-    if (firstRow[0] !== 'event_url') continue; // Not our format
-    
-    // Get all data from this sheet
-    const data = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
-    
-    for (const row of data) {
-      const eventUrl = row[0];
-      const personEmail = row[3];
-      
-      if (eventUrl) {
-        seenEvents.add(eventUrl);
+  // Get registrations from Master sheet ONLY (to avoid duplicates)
+  // Master sheet is the single source of truth for all registrations
+  const masterSheet = ss.getSheetByName('Master');
+  
+  if (masterSheet) {
+    const lastRow = masterSheet.getLastRow();
+    if (lastRow >= 2) {
+      const firstRow = masterSheet.getRange(1, 1, 1, 4).getValues()[0];
+      if (firstRow[0] === 'event_url') {
+        // Get all data: event_url, title, event_date, person_email, person_name, calendar, registered_at
+        const data = masterSheet.getRange(2, 1, lastRow - 1, 7).getValues();
         
-        // Check if this email is registered
-        if (personEmail && personEmail.toLowerCase() === email.toLowerCase()) {
-          myRegistrations.add(eventUrl);
+        for (const row of data) {
+          const eventUrl = row[0];
+          const personEmail = row[3];
+          const eventCalendar = row[5]; // calendar column
+          const registeredAt = row[6];
+          
+          // If calendar filter is specified, only include events from that calendar
+          if (calendar && eventCalendar !== calendar) continue;
+          
+          if (eventUrl) {
+            seenEvents.add(eventUrl);
+            
+            if (personEmail) {
+              // Track who registered for this event
+              if (!teamRegistrations[eventUrl]) {
+                teamRegistrations[eventUrl] = [];
+              }
+              
+              // Add registration info (avoid duplicates by checking email)
+              const alreadyAdded = teamRegistrations[eventUrl].some(
+                r => r.email.toLowerCase() === personEmail.toLowerCase()
+              );
+              
+              if (!alreadyAdded) {
+                teamRegistrations[eventUrl].push({
+                  email: personEmail,
+                  registeredAt: registeredAt
+                });
+              }
+              
+              // Check if this is the current user
+              if (personEmail.toLowerCase() === email.toLowerCase()) {
+                myRegistrations.add(eventUrl);
+              }
+            }
+          }
         }
       }
     }
   }
   
+  // Filter teamRegistrations to only include events where current user hasn't registered
+  const teamOnlyRegistrations = {};
+  for (const [url, registrations] of Object.entries(teamRegistrations)) {
+    if (!myRegistrations.has(url)) {
+      // Current user hasn't registered - this is a "team registered, you haven't" event
+      teamOnlyRegistrations[url] = registrations;
+    }
+  }
+  
   return {
     seenEvents: Array.from(seenEvents),
-    myRegistrations: Array.from(myRegistrations)
+    myRegistrations: Array.from(myRegistrations),
+    teamRegistrations: teamOnlyRegistrations, // Events where team registered but current user hasn't
+    firstSeenDates: firstSeenDates
+  };
+}
+
+// Record events that were seen during a scan (for "first seen" tracking)
+function recordSeenEvents(events, calendar, scannedBy) {
+  if (!events || !Array.isArray(events) || events.length === 0) {
+    return { recorded: 0, newEvents: 0 };
+  }
+  
+  const sheet = getSeenEventsSheet();
+  const now = new Date().toISOString();
+  const calendarName = calendar || 'default';
+  
+  // Get existing URLs to avoid duplicates
+  const lastRow = sheet.getLastRow();
+  const existingUrls = new Set();
+  
+  if (lastRow > 1) {
+    const existingData = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (const row of existingData) {
+      if (row[0]) existingUrls.add(row[0]);
+    }
+  }
+  
+  // Add new events
+  let newCount = 0;
+  const newRows = [];
+  
+  for (const event of events) {
+    if (event.url && !existingUrls.has(event.url)) {
+      newRows.push([
+        event.url,
+        event.title || '',
+        event.date || '',
+        calendarName,
+        now,
+        scannedBy || ''
+      ]);
+      newCount++;
+    }
+  }
+  
+  // Batch append for efficiency
+  if (newRows.length > 0) {
+    const startRow = lastRow + 1;
+    sheet.getRange(startRow, 1, newRows.length, SEEN_EVENTS_HEADERS.length).setValues(newRows);
+    console.log('Recorded', newRows.length, 'new events for calendar:', calendarName);
+  }
+  
+  return {
+    recorded: events.length,
+    newEvents: newCount,
+    calendar: calendarName
   };
 }
 

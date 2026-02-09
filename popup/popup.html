@@ -102,8 +102,22 @@
           <span id="pendingCount">0</span>
         </div>
       </div>
-      <button id="exportBtn" class="btn btn-secondary">Export Results</button>
-      <button id="resetBtn" class="btn btn-secondary">Start New Batch</button>
+      
+      <!-- Failed Events List with Re-check and Mark options -->
+      <div id="failedEventsContainer" style="display: none;">
+        <div class="failed-events-header">
+          <h3>Failed/Manual Events</h3>
+          <button id="recheckAllBtn" class="btn btn-small btn-recheck" title="Re-scan all open tabs to check if registration succeeded">
+            🔄 Re-check All Tabs
+          </button>
+        </div>
+        <div id="failedEventsList" class="failed-events-list"></div>
+      </div>
+      
+      <div class="results-buttons">
+        <button id="exportBtn" class="btn btn-secondary">Export Results</button>
+        <button id="resetBtn" class="btn btn-secondary">Start New Batch</button>
+      </div>
     </div>
 
     <div id="logSection" class="section">

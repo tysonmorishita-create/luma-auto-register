@@ -55,6 +55,9 @@ class DashboardController {
         case 'REGISTRATION_RESULT':
           this.addResult(message.data);
           break;
+        case 'REGISTRATION_RESULT_UPDATE':
+          this.updateResult(message.data);
+          break;
         case 'REGISTRATION_COMPLETE':
           this.handleComplete();
           break;
@@ -140,6 +143,51 @@ class DashboardController {
     this.saveState();
   }
 
+  updateResult(updatedResult) {
+    // Find and update the existing result (by URL and tabId)
+    const index = this.results.findIndex(r => 
+      r.url === updatedResult.url && r.tabId === updatedResult.tabId
+    );
+    
+    if (index !== -1) {
+      this.results[index] = updatedResult;
+      this.renderResults();
+      this.saveState();
+      
+      // Show a notification for re-verified successes
+      if (updatedResult.reverified && updatedResult.status === 'success') {
+        this.showNotification(`🔄 Re-verified: ${updatedResult.title} - Registration confirmed!`);
+      }
+    }
+  }
+
+  showNotification(message) {
+    // Create a temporary toast notification
+    const toast = document.createElement('div');
+    toast.className = 'toast-notification';
+    toast.textContent = message;
+    toast.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #10b981;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      z-index: 10000;
+      animation: slideIn 0.3s ease-out;
+      max-width: 400px;
+    `;
+    document.body.appendChild(toast);
+    
+    // Remove after 4 seconds
+    setTimeout(() => {
+      toast.style.animation = 'fadeOut 0.3s ease-out';
+      setTimeout(() => toast.remove(), 300);
+    }, 4000);
+  }
+
   renderResults() {
     if (this.results.length === 0) {
       this.resultsList.innerHTML = `
@@ -161,7 +209,10 @@ class DashboardController {
       if (result.status === 'success') {
         // Distinguish between new registrations and events that were already signed up
         const msgLower = (result.message || '').toLowerCase();
-        if (
+        if (result.reverified) {
+          // Event was re-verified after initial failure
+          statusLabel = '🔄 Re-verified';
+        } else if (
           msgLower.includes('already registered') ||
           msgLower.includes('already signed up') ||
           msgLower.includes('pending approval') ||
@@ -184,8 +235,17 @@ class DashboardController {
       // - For failed/manual: use tabId to jump to the still-open tab
       // - For success: use the stored URL so we can re-open the event page
       let tabLink = '';
+      let markRegisteredBtn = '';
       if (result.tabId && (result.status === 'failed' || result.status === 'manual')) {
         tabLink = `<button class="tab-link-btn" data-tab-id="${result.tabId}" title="Click to switch to this tab">🔗 View Tab</button>`;
+        // Add "Mark as Registered" button for failed/manual events
+        markRegisteredBtn = `<button class="mark-registered-btn" data-url="${result.url}" data-tab-id="${result.tabId}" title="Manually mark this event as registered and add to database">✓ Mark Done</button>`;
+      } else if (result.status === 'failed' || result.status === 'manual') {
+        // Failed/manual without tabId - still allow marking as registered
+        markRegisteredBtn = `<button class="mark-registered-btn" data-url="${result.url}" data-tab-id="" title="Manually mark this event as registered and add to database">✓ Mark Done</button>`;
+        if (result.url) {
+          tabLink = `<button class="tab-link-btn" data-url="${result.url}" title="Open event in a new tab">🔗 View Event</button>`;
+        }
       } else if (result.url) {
         tabLink = `<button class="tab-link-btn" data-url="${result.url}" title="Open event in a new tab">🔗 View Event</button>`;
       }
@@ -204,6 +264,7 @@ class DashboardController {
             </span>
             ${result.message ? `<span class="result-message">${result.message}</span>` : ''}
             ${tabLink}
+            ${markRegisteredBtn}
           </div>
         </div>
       `;
@@ -236,6 +297,46 @@ class DashboardController {
         } else if (url) {
           // Successful registrations or entries without a live tab: open the event URL
           chrome.tabs.create({ url, active: true });
+        }
+      });
+    });
+    
+    // Attach click handlers for "Mark as Registered" buttons
+    this.resultsList.querySelectorAll('.mark-registered-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const target = e.currentTarget;
+        const url = target.getAttribute('data-url');
+        const tabIdAttr = target.getAttribute('data-tab-id');
+        const tabId = tabIdAttr ? parseInt(tabIdAttr, 10) : null;
+        
+        // Disable button and show loading state
+        target.disabled = true;
+        target.textContent = '⏳ Marking...';
+        
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: 'MARK_AS_REGISTERED',
+            url: url,
+            tabId: tabId
+          });
+          
+          if (response && response.success) {
+            this.showNotification(`✓ Marked as registered: ${response.title}`);
+            // Update stats
+            this.stats.failed = Math.max(0, (this.stats.failed || 0) - 1);
+            this.stats.success = (this.stats.success || 0) + 1;
+            this.updateDisplay();
+            // Reload results to reflect the change
+            await this.loadState();
+          } else {
+            alert(`Failed to mark as registered: ${response?.error || 'Unknown error'}`);
+            target.disabled = false;
+            target.textContent = '✓ Mark Done';
+          }
+        } catch (error) {
+          alert(`Error: ${error.message}`);
+          target.disabled = false;
+          target.textContent = '✓ Mark Done';
         }
       });
     });

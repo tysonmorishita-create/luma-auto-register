@@ -320,9 +320,43 @@ h3 {
   white-space: nowrap;
 }
 
+.team-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #d97706;
+  background: #fef3c7;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.event-item.team-registered {
+  border-left: 3px solid #f59e0b;
+  background: linear-gradient(90deg, #fffbeb 0%, transparent 30%);
+}
+
 .event-item.new-event {
   background: #f0fdf4;
   border-color: #bbf7d0;
+}
+
+.team-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #d97706;
+  background: #fef3c7;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.event-item.team-registered {
+  background: #fffbeb;
+  border-color: #fde68a;
 }
 
 .event-item.new-event .event-title {
@@ -562,6 +596,151 @@ h3 {
 .debug-value {
   color: #374151;
   margin-left: 12px;
+}
+
+/* Failed Events Section */
+.failed-events-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.failed-events-header h3 {
+  margin: 0;
+  font-size: 13px;
+  color: #374151;
+}
+
+.btn-recheck {
+  background: #6366f1;
+  color: white;
+  border: none;
+}
+
+.btn-recheck:hover {
+  background: #4f46e5;
+}
+
+.btn-recheck:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.failed-events-list {
+  max-height: 150px;
+  overflow-y: auto;
+  background: white;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 12px;
+}
+
+.failed-event-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+  margin-bottom: 6px;
+  background: #fef2f2;
+  border-radius: 4px;
+  border: 1px solid #fecaca;
+  gap: 8px;
+}
+
+.failed-event-item:last-child {
+  margin-bottom: 0;
+}
+
+.failed-event-item.manual {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.failed-event-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.failed-event-title {
+  font-size: 12px;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 2px;
+}
+
+.failed-event-status {
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.failed-event-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-mark-registered {
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  background: #10b981;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-mark-registered:hover {
+  background: #059669;
+}
+
+.btn-recheck-single {
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  background: #6366f1;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-recheck-single:hover {
+  background: #4f46e5;
+}
+
+.results-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.results-buttons .btn {
+  flex: 1;
+}
+
+#failedEventsContainer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.recheck-status {
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 8px;
+  padding: 8px;
+  background: #f3f4f6;
+  border-radius: 4px;
+  text-align: center;
 }
 
 /* Scrollbar styles */

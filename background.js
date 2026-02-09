@@ -105,6 +105,223 @@ class DebugLogger {
 // Initialize global debug logger
 const debugLogger = new DebugLogger();
 
+// ============================================
+// TRUSTED CLICK HELPER - Uses Chrome Debugger API
+// ============================================
+// This sends native, trusted mouse events that bypass Turnstile detection
+
+async function sendTrustedClick(tabId, x, y) {
+  const debuggerTarget = { tabId: tabId };
+  
+  try {
+    console.log(`[TrustedClick] Attempting to attach debugger to tab ${tabId}`);
+    
+    // Attach debugger to the tab
+    await chrome.debugger.attach(debuggerTarget, '1.3');
+    console.log('[TrustedClick] Debugger attached successfully');
+    
+    // Add some random delay to appear more human
+    await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
+    
+    // Generate Bezier curve path for mouse movement
+    const startX = Math.random() * 500 + 100;
+    const startY = Math.random() * 300 + 100;
+    const numPoints = 15 + Math.floor(Math.random() * 10);
+    
+    // Control points for Bezier curve
+    const cp1x = startX + (x - startX) * 0.25 + (Math.random() - 0.5) * 60;
+    const cp1y = startY + (y - startY) * 0.1 + (Math.random() - 0.5) * 60;
+    const cp2x = startX + (x - startX) * 0.75 + (Math.random() - 0.5) * 40;
+    const cp2y = startY + (y - startY) * 0.9 + (Math.random() - 0.5) * 40;
+    
+    // Move mouse along curve
+    for (let i = 0; i <= numPoints; i++) {
+      const t = i / numPoints;
+      const curX = Math.pow(1-t, 3) * startX + 
+                   3 * Math.pow(1-t, 2) * t * cp1x + 
+                   3 * (1-t) * Math.pow(t, 2) * cp2x + 
+                   Math.pow(t, 3) * x;
+      const curY = Math.pow(1-t, 3) * startY + 
+                   3 * Math.pow(1-t, 2) * t * cp1y + 
+                   3 * (1-t) * Math.pow(t, 2) * cp2y + 
+                   Math.pow(t, 3) * y;
+      
+      await chrome.debugger.sendCommand(debuggerTarget, 'Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: Math.round(curX),
+        y: Math.round(curY)
+      });
+      
+      // Variable delay between movements
+      const delay = 8 + Math.random() * 15;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    console.log(`[TrustedClick] Mouse moved to (${Math.round(x)}, ${Math.round(y)})`);
+    
+    // Small pause before clicking
+    await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 100));
+    
+    // Mouse down
+    await chrome.debugger.sendCommand(debuggerTarget, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: Math.round(x),
+      y: Math.round(y),
+      button: 'left',
+      clickCount: 1
+    });
+    
+    console.log('[TrustedClick] Mouse pressed');
+    
+    // Human-like press duration
+    await new Promise(resolve => setTimeout(resolve, 60 + Math.random() * 80));
+    
+    // Mouse up
+    await chrome.debugger.sendCommand(debuggerTarget, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: Math.round(x),
+      y: Math.round(y),
+      button: 'left',
+      clickCount: 1
+    });
+    
+    console.log('[TrustedClick] Mouse released - click complete');
+    
+    // Small delay before detaching
+    await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
+    
+    // Detach debugger
+    await chrome.debugger.detach(debuggerTarget);
+    console.log('[TrustedClick] Debugger detached');
+    
+    return { success: true };
+  } catch (error) {
+    console.error('[TrustedClick] Error:', error);
+    
+    // Try to detach debugger if attached
+    try {
+      await chrome.debugger.detach(debuggerTarget);
+    } catch (e) {
+      // Debugger wasn't attached or already detached
+    }
+    
+    return { success: false, error: error.message };
+  }
+}
+
+// Find Turnstile checkbox position and click it using trusted events
+async function clickTurnstileCheckbox(tabId) {
+  console.log(`[TurnstileBypass] Attempting to click Turnstile checkbox for tab ${tabId}`);
+  
+  try {
+    // Wait for Turnstile widget to fully render before attempting to find it
+    await new Promise(r => setTimeout(r, 1500 + Math.random() * 500));
+    
+    // First, find the Turnstile iframe position
+    const positionResult = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      function: () => {
+        // Look for Turnstile iframe - expanded selectors for better detection
+        var iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[src*="cf-turnstile"], iframe[title*="Cloudflare"], iframe[title*="turnstile"]');
+        
+        // If no iframe found by selector, try to find by typical Turnstile dimensions
+        if (!iframe) {
+          var allIframes = document.querySelectorAll('iframe');
+          for (var i = 0; i < allIframes.length; i++) {
+            var f = allIframes[i];
+            var rect = f.getBoundingClientRect();
+            // Turnstile iframes are typically small (around 300x65) and visible
+            if (rect.width > 200 && rect.width < 400 && rect.height > 40 && rect.height < 100) {
+              iframe = f;
+              console.log('[TurnstileBypass] Found potential Turnstile iframe by size:', f.src);
+              break;
+            }
+          }
+        }
+        
+        // If still no iframe, look for Turnstile container div (fallback)
+        if (!iframe) {
+          var turnstileDiv = document.querySelector('[class*="turnstile"], [id*="turnstile"], .cf-turnstile, #cf-turnstile');
+          if (turnstileDiv) {
+            var rect = turnstileDiv.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              console.log('[TurnstileBypass] Found Turnstile container div');
+              return {
+                found: true,
+                x: rect.left + 25 + (Math.random() - 0.5) * 10,
+                y: rect.top + rect.height / 2 + (Math.random() - 0.5) * 8,
+                elementType: 'div',
+                elementRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+              };
+            }
+          }
+        }
+        
+        if (iframe) {
+          var rect = iframe.getBoundingClientRect();
+          // Checkbox is typically at the left side of the iframe
+          var checkboxX = rect.left + 25 + (Math.random() - 0.5) * 10;
+          var checkboxY = rect.top + rect.height / 2 + (Math.random() - 0.5) * 8;
+          
+          console.log('[TurnstileBypass] Found iframe at:', rect);
+          return {
+            found: true,
+            x: checkboxX,
+            y: checkboxY,
+            elementType: 'iframe',
+            iframeRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+            iframeSrc: iframe.src || '(no src)'
+          };
+        }
+        
+        return { found: false };
+      }
+    });
+    
+    const position = positionResult[0]?.result;
+    
+    if (!position || !position.found) {
+      console.log('[TurnstileBypass] Turnstile iframe not found');
+      return { success: false, error: 'Turnstile iframe not found' };
+    }
+    
+    console.log(`[TurnstileBypass] Found Turnstile at (${position.x}, ${position.y})`);
+    
+    // Send trusted click using debugger API
+    const clickResult = await sendTrustedClick(tabId, position.x, position.y);
+    
+    if (clickResult.success) {
+      console.log('[TurnstileBypass] Trusted click sent successfully');
+      
+      // Wait a moment and check if Turnstile is still present
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      const checkResult = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        function: () => {
+          const bodyText = (document.body.textContent || '').toLowerCase();
+          const stillPresent = bodyText.indexOf('verify you are human') > -1 ||
+            document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]') !== null;
+          return { stillPresent };
+        }
+      });
+      
+      const stillPresent = checkResult[0]?.result?.stillPresent;
+      
+      return { 
+        success: true, 
+        turnstileCleared: !stillPresent,
+        message: stillPresent ? 'Click sent but Turnstile still present' : 'Turnstile appears to be cleared'
+      };
+    } else {
+      return clickResult;
+    }
+  } catch (error) {
+    console.error('[TurnstileBypass] Error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // Google Sheets API Helper - For multi-person registration tracking
 class GoogleSheetsAPI {
   constructor() {
@@ -172,17 +389,78 @@ class GoogleSheetsAPI {
       const data = await response.json();
       console.log('[GoogleSheetsAPI] Scan status received:', {
         seenEvents: data.seenEvents?.length || 0,
-        myRegistrations: data.myRegistrations?.length || 0
+        myRegistrations: data.myRegistrations?.length || 0,
+        teamRegistrations: Object.keys(data.teamRegistrations || {}).length,
+        firstSeenDates: Object.keys(data.firstSeenDates || {}).length
       });
       
       return {
         success: true,
         seenEvents: data.seenEvents || [],
-        myRegistrations: data.myRegistrations || []
+        myRegistrations: data.myRegistrations || [],
+        teamRegistrations: data.teamRegistrations || {}, // Events where team registered but current user hasn't
+        firstSeenDates: data.firstSeenDates || {} // { url: { date, by } }
       };
     } catch (error) {
       console.error('[GoogleSheetsAPI] getScanStatus failed:', error);
       debugLogger.log('error', 'Google Sheets API getScanStatus failed', { error: error.message });
+      return { success: false, error: error.message, seenEvents: [], myRegistrations: [], teamRegistrations: {}, firstSeenDates: {} };
+    }
+  }
+
+  // Record events that were seen during scanning (for "first seen" tracking)
+  async recordSeenEvents(events, calendar, scannedBy) {
+    await this.ensureInitialized();
+    
+    if (!this.isConfigured()) {
+      console.log('[GoogleSheetsAPI] Skipping recordSeenEvents - API not configured');
+      return { success: false, error: 'API not configured' };
+    }
+
+    if (!events || events.length === 0) {
+      return { success: true, recorded: 0, newEvents: 0 };
+    }
+
+    try {
+      const eventsData = events.map(e => ({
+        url: e.url,
+        title: e.title || '',
+        date: e.date || ''
+      }));
+
+      // Use POST to avoid URL length limits with many events
+      const postData = {
+        action: 'recordSeenEvents',
+        events: JSON.stringify(eventsData),
+        calendar: calendar || 'default',
+        scannedBy: scannedBy || ''
+      };
+
+      console.log('[GoogleSheetsAPI] Recording', events.length, 'seen events for calendar:', calendar);
+      
+      const response = await fetch(this.apiUrl, {
+        method: 'POST',
+        headers: { 
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams(postData).toString()
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('[GoogleSheetsAPI] Seen events recorded:', data);
+      
+      return {
+        success: true,
+        recorded: data.recorded || 0,
+        newEvents: data.newEvents || 0
+      };
+    } catch (error) {
+      console.error('[GoogleSheetsAPI] recordSeenEvents failed:', error);
       return { success: false, error: error.message };
     }
   }
@@ -337,6 +615,10 @@ class RegistrationManager {
     // Adaptive speed tracking
     this.consecutiveFailures = 0;
     this.adaptiveDelayMultiplier = 1.0;
+    
+    // Delayed re-verification queue for failed/manual events
+    // After 20 seconds, re-check if the registration actually succeeded
+    this.pendingReverification = new Map(); // tabId -> { event, timerId }
   }
 
   async init() {
@@ -358,6 +640,433 @@ class RegistrationManager {
         console.log('[Event Auto Register] Stored window ID no longer exists, cleared');
       }
     }
+  }
+
+  // Schedule a delayed re-verification for a failed/manual event
+  // After 20 seconds, re-check the tab to see if registration actually succeeded
+  scheduleReverification(tabId, event) {
+    // Don't schedule if tab ID is invalid
+    if (!tabId) {
+      console.log('[Reverify] No tab ID provided, skipping re-verification scheduling');
+      return;
+    }
+    
+    // Cancel any existing timer for this tab
+    if (this.pendingReverification.has(tabId)) {
+      const existing = this.pendingReverification.get(tabId);
+      clearTimeout(existing.timerId);
+    }
+    
+    console.log(`[Reverify] Scheduling re-verification for tab ${tabId} (${event.title}) in 20 seconds`);
+    this.sendLog('info', `  🔄 Scheduled re-verification in 20s for: ${event.title}`);
+    
+    const timerId = setTimeout(() => {
+      this.reverifyEvent(tabId, event);
+    }, 20000); // 20 seconds
+    
+    this.pendingReverification.set(tabId, { event, timerId });
+  }
+  
+  // Re-check a tab to see if registration actually succeeded (delayed verification)
+  async reverifyEvent(tabId, event) {
+    console.log(`[Reverify] Re-verifying tab ${tabId} for: ${event.title}`);
+    
+    // Remove from pending queue
+    this.pendingReverification.delete(tabId);
+    
+    try {
+      // Check if tab still exists
+      let tab;
+      try {
+        tab = await chrome.tabs.get(tabId);
+      } catch (e) {
+        console.log(`[Reverify] Tab ${tabId} no longer exists, skipping`);
+        return;
+      }
+      
+      // Check for success indicators on the page
+      const checkResult = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        function: () => {
+          var bodyText = (document.body.textContent || '').toLowerCase();
+          
+          // Success patterns
+          var successPatterns = [
+            "you're in",
+            "you're going",
+            "you're registered",
+            "registration confirmed",
+            "pending approval",
+            "you're on the waitlist",
+            "ticket confirmed",
+            "see you there",
+            "successfully registered",
+            "registration complete",
+            "rsvp confirmed"
+          ];
+          
+          for (var i = 0; i < successPatterns.length; i++) {
+            if (bodyText.indexOf(successPatterns[i]) > -1) {
+              return { success: true, pattern: successPatterns[i] };
+            }
+          }
+          
+          return { success: false };
+        }
+      });
+      
+      const result = checkResult[0]?.result;
+      
+      if (result && result.success) {
+        console.log(`[Reverify] ✓ SUCCESS! Tab ${tabId} now shows: "${result.pattern}"`);
+        this.sendLog('success', `🔄 Re-verified SUCCESS: ${event.title} (found: "${result.pattern}")`);
+        
+        // Update the event status in results
+        const eventIndex = this.results.findIndex(r => r.url === event.url && r.tabId === tabId);
+        if (eventIndex !== -1) {
+          // Adjust stats
+          if (this.results[eventIndex].status === 'failed') {
+            this.stats.failed--;
+            this.stats.success++;
+          } else if (this.results[eventIndex].status === 'manual') {
+            this.stats.manual--;
+            this.stats.success++;
+          }
+          
+          // Update the result
+          this.results[eventIndex].status = 'success';
+          this.results[eventIndex].message = `Re-verified: ${result.pattern}`;
+          this.results[eventIndex].reverified = true;
+          
+          // Save state
+          await this.saveState();
+          
+          // Notify dashboard of the update
+          try {
+            chrome.runtime.sendMessage({
+              type: 'REGISTRATION_RESULT_UPDATE',
+              data: {
+                ...this.results[eventIndex],
+                reverified: true
+              }
+            });
+            
+            // Also send updated stats
+            chrome.runtime.sendMessage({
+              type: 'STATUS_UPDATE',
+              data: this.stats
+            });
+          } catch (e) {
+            // Dashboard might be closed
+          }
+          
+          // Add to Google Sheets since it's now confirmed successful
+          try {
+            const userSettingsResult = await chrome.storage.local.get(['userSettings']);
+            const userSettings = userSettingsResult.userSettings || {};
+            
+            if (userSettings.googleSheetsApiUrl && userSettings.email) {
+              const addResult = await googleSheetsAPI.addRegistration({
+                event_url: event.url,
+                title: event.title,
+                event_date: event.date || '',
+                person_email: userSettings.email,
+                person_name: userSettings.firstName && userSettings.lastName 
+                  ? `${userSettings.firstName} ${userSettings.lastName}` 
+                  : userSettings.name || '',
+                calendar: event.calendarId || 'default'
+              });
+              
+              if (addResult.added) {
+                this.sendLog('info', `  📊 Added to Google Sheets (re-verified)`);
+              }
+            }
+          } catch (sheetError) {
+            console.log('[Reverify] Could not add to Google Sheets:', sheetError.message);
+          }
+        }
+        
+        // Close the tab since it's now confirmed successful
+        try {
+          await chrome.tabs.remove(tabId);
+          this.sendLog('info', `  Closed tab ${tabId} after successful re-verification`);
+        } catch (e) {
+          // Tab might already be closed
+        }
+      } else {
+        console.log(`[Reverify] Tab ${tabId} still shows failure/manual status`);
+        this.sendLog('info', `  🔄 Re-verified: ${event.title} - still requires manual review`);
+        // Keep the tab open for manual review
+      }
+    } catch (error) {
+      console.error(`[Reverify] Error re-verifying tab ${tabId}:`, error);
+      // Don't log this as an error to user, just skip silently
+    }
+  }
+  
+  // Cancel all pending re-verifications (called when stopping)
+  cancelAllReverifications() {
+    for (const [tabId, data] of this.pendingReverification) {
+      clearTimeout(data.timerId);
+    }
+    this.pendingReverification.clear();
+    console.log('[Reverify] Cancelled all pending re-verifications');
+  }
+  
+  // Re-check all failed/manual tabs to see if registration succeeded
+  async recheckAllFailedTabs() {
+    console.log('[Recheck] Re-checking all failed tabs...');
+    
+    const failedEvents = this.results.filter(r => r.status === 'failed' || r.status === 'manual');
+    let updated = 0;
+    let total = failedEvents.length;
+    
+    for (const event of failedEvents) {
+      if (!event.tabId) continue;
+      
+      try {
+        const result = await this.recheckSingleTab(event.url, event.tabId);
+        if (result.updated) {
+          updated++;
+        }
+      } catch (error) {
+        console.log(`[Recheck] Error checking ${event.url}: ${error.message}`);
+      }
+    }
+    
+    console.log(`[Recheck] Complete: ${updated} of ${total} updated`);
+    
+    // Broadcast completion
+    chrome.runtime.sendMessage({
+      type: 'RECHECK_COMPLETE',
+      data: { updated, total }
+    }).catch(() => {});
+    
+    return { updated, total };
+  }
+  
+  // Re-check a single tab to see if registration succeeded
+  async recheckSingleTab(url, tabId) {
+    console.log(`[Recheck] Checking tab ${tabId} for: ${url}`);
+    
+    // Find the event in results
+    const eventIndex = this.results.findIndex(r => r.url === url);
+    if (eventIndex === -1) {
+      return { updated: false, error: 'Event not found in results' };
+    }
+    
+    const event = this.results[eventIndex];
+    
+    // Check if tab still exists
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+      if (!tab) throw new Error('Tab not found');
+    } catch (error) {
+      console.log(`[Recheck] Tab ${tabId} no longer exists`);
+      return { updated: false, title: event.title, error: 'Tab no longer exists' };
+    }
+    
+    // Execute script to check for success patterns
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: () => {
+          // Check for success patterns on the page
+          const bodyText = document.body?.innerText?.toLowerCase() || '';
+          const successPatterns = [
+            "you're in",
+            "youre in",
+            "pending approval",
+            "ticket confirmed",
+            "registration confirmed",
+            "successfully registered",
+            "thanks for registering",
+            "see you there",
+            "your spot is confirmed",
+            "you've been registered",
+            "registration complete",
+            "you are registered"
+          ];
+          
+          for (const pattern of successPatterns) {
+            if (bodyText.includes(pattern)) {
+              return { success: true, pattern: pattern };
+            }
+          }
+          
+          // Also check for confirmation elements
+          const confirmationSelectors = [
+            '[data-testid="confirmation"]',
+            '.confirmation',
+            '.success-message',
+            '.registration-success',
+            '[class*="confirmed"]',
+            '[class*="success"]'
+          ];
+          
+          for (const selector of confirmationSelectors) {
+            const el = document.querySelector(selector);
+            if (el && el.innerText) {
+              return { success: true, pattern: `Found: ${selector}` };
+            }
+          }
+          
+          return { success: false };
+        }
+      });
+      
+      if (result?.result?.success) {
+        // Update the event status
+        const prevStatus = this.results[eventIndex].status;
+        
+        // Adjust stats
+        if (prevStatus === 'failed') {
+          this.stats.failed = Math.max(0, this.stats.failed - 1);
+          this.stats.success++;
+        } else if (prevStatus === 'manual') {
+          this.stats.manual = Math.max(0, this.stats.manual - 1);
+          this.stats.success++;
+        }
+        
+        this.results[eventIndex].status = 'success';
+        this.results[eventIndex].message = `Re-checked: ${result.result.pattern}`;
+        this.results[eventIndex].rechecked = true;
+        
+        // Save state
+        await this.saveState();
+        
+        // Add to Google Sheets if configured
+        try {
+          await this.addRegistrationToGoogleSheets(event);
+        } catch (gsError) {
+          console.log('[Recheck] Google Sheets error:', gsError.message);
+        }
+        
+        // Close the tab
+        try {
+          await chrome.tabs.remove(tabId);
+          console.log(`[Recheck] Closed tab ${tabId}`);
+        } catch (closeError) {
+          console.log(`[Recheck] Could not close tab: ${closeError.message}`);
+        }
+        
+        // Broadcast update
+        chrome.runtime.sendMessage({
+          type: 'REGISTRATION_RESULT_UPDATE',
+          data: {
+            ...this.results[eventIndex],
+            rechecked: true
+          }
+        }).catch(() => {});
+        
+        console.log(`[Recheck] SUCCESS: ${event.title} - ${result.result.pattern}`);
+        this.sendLog('success', `✓ Re-check confirmed: ${event.title}`);
+        
+        return { updated: true, title: event.title, pattern: result.result.pattern };
+      } else {
+        console.log(`[Recheck] Still failed: ${event.title}`);
+        return { updated: false, title: event.title };
+      }
+    } catch (error) {
+      console.log(`[Recheck] Script error: ${error.message}`);
+      return { updated: false, title: event.title, error: error.message };
+    }
+  }
+  
+  // Helper to add registration to Google Sheets
+  async addRegistrationToGoogleSheets(event) {
+    try {
+      const userSettingsResult = await chrome.storage.local.get('userSettings');
+      const userSettings = userSettingsResult.userSettings || {};
+      
+      if (!googleSheetsAPI.isConfigured() || !userSettings.email) {
+        console.log('[AddToSheets] Skipping - Google Sheets not configured or no email');
+        return;
+      }
+      
+      const personName = [userSettings.firstName, userSettings.lastName].filter(Boolean).join(' ');
+      
+      const result = await googleSheetsAPI.addRegistration({
+        url: event.url,
+        title: event.title,
+        date: event.date || '',
+        email: userSettings.email,
+        name: personName,
+        calendar: event.calendarId || 'default'
+      });
+      
+      if (result.success) {
+        console.log('[AddToSheets] Saved to Google Sheets:', event.title);
+      } else {
+        console.log('[AddToSheets] Failed to save:', result.error);
+      }
+    } catch (error) {
+      console.log('[AddToSheets] Error:', error.message);
+    }
+  }
+  
+  // Manually mark an event as registered
+  async markEventAsRegistered(url, tabId) {
+    console.log(`[MarkRegistered] Marking as registered: ${url}`);
+    
+    // Find the event in results
+    const eventIndex = this.results.findIndex(r => r.url === url);
+    if (eventIndex === -1) {
+      return { error: 'Event not found in results' };
+    }
+    
+    const event = this.results[eventIndex];
+    const prevStatus = event.status;
+    
+    // Adjust stats
+    if (prevStatus === 'failed') {
+      this.stats.failed = Math.max(0, this.stats.failed - 1);
+      this.stats.success++;
+    } else if (prevStatus === 'manual') {
+      this.stats.manual = Math.max(0, this.stats.manual - 1);
+      this.stats.success++;
+    }
+    
+    // Update the event
+    this.results[eventIndex].status = 'success';
+    this.results[eventIndex].message = 'Manually marked as registered';
+    this.results[eventIndex].manuallyMarked = true;
+    this.results[eventIndex].manuallyMarkedAt = new Date().toISOString();
+    
+    // Save state
+    await this.saveState();
+    
+    // Add to Google Sheets if configured
+    try {
+      await this.addRegistrationToGoogleSheets(event);
+      console.log(`[MarkRegistered] Added to Google Sheets: ${event.title}`);
+    } catch (gsError) {
+      console.log('[MarkRegistered] Google Sheets error:', gsError.message);
+    }
+    
+    // Try to close the tab if it exists
+    if (tabId) {
+      try {
+        await chrome.tabs.remove(tabId);
+        console.log(`[MarkRegistered] Closed tab ${tabId}`);
+      } catch (closeError) {
+        console.log(`[MarkRegistered] Could not close tab: ${closeError.message}`);
+      }
+    }
+    
+    // Broadcast update
+    chrome.runtime.sendMessage({
+      type: 'REGISTRATION_RESULT_UPDATE',
+      data: {
+        ...this.results[eventIndex],
+        manuallyMarked: true
+      }
+    }).catch(() => {});
+    
+    this.sendLog('success', `✓ Marked as registered: ${event.title}`);
+    
+    return { title: event.title };
   }
 
   async startScanCurrentTab(tabId) {
@@ -1319,6 +2028,8 @@ class RegistrationManager {
         // Try Google Sheets API first for multi-person tracking
         let seenEvents = [];
         let myRegistrations = [];
+        let teamRegistrations = {}; // Events where teammates registered but current user hasn't
+        let firstSeenDates = {}; // { url: { date, by } }
         let useGoogleSheets = false;
 
         await googleSheetsAPI.refresh(); // Refresh in case settings changed
@@ -1328,6 +2039,8 @@ class RegistrationManager {
           if (apiResult.success) {
             seenEvents = apiResult.seenEvents || [];
             myRegistrations = apiResult.myRegistrations || [];
+            teamRegistrations = apiResult.teamRegistrations || {};
+            firstSeenDates = apiResult.firstSeenDates || {};
             useGoogleSheets = true;
             this.sendLog('info', `📊 Google Sheets: ${seenEvents.length} seen events, ${myRegistrations.length} registered for ${userEmail}`);
           } else {
@@ -1339,6 +2052,17 @@ class RegistrationManager {
         const storageResult = await chrome.storage.local.get(['registeredEvents']);
         const registeredEvents = storageResult.registeredEvents || {};
 
+        // Calculate what's "new" (first seen in last 48 hours)
+        const now = new Date();
+        const newThresholdMs = 48 * 60 * 60 * 1000; // 48 hours
+        
+        const isRecentlyFirstSeen = (url) => {
+          const firstSeen = firstSeenDates[url];
+          if (!firstSeen || !firstSeen.date) return false;
+          const firstSeenDate = new Date(firstSeen.date);
+          return (now - firstSeenDate) < newThresholdMs;
+        };
+
         // Format events - filter out external events that can't be auto-registered
         const formattedEvents = scrapedEvents
           .filter(event => !event.isExternal && event.url) // Skip external events
@@ -1347,13 +2071,25 @@ class RegistrationManager {
           const eventUrl = event.url;
           
           // Determine registration status
-          let isRegistered;
+          let isRegistered = false;
           let isNew = false;
+          let teamRegistered = null; // Array of emails who registered, or null
+          let firstSeenDate = null;
           
           if (useGoogleSheets) {
             // Use Google Sheets data - check by URL
             isRegistered = myRegistrations.includes(eventUrl);
-            isNew = !seenEvents.includes(eventUrl);
+            isNew = !seenEvents.includes(eventUrl); // Never seen before = truly new
+            
+            // Check if team registered but current user hasn't
+            if (teamRegistrations[eventUrl]) {
+              teamRegistered = teamRegistrations[eventUrl];
+            }
+            
+            // Get first seen date if available
+            if (firstSeenDates[eventUrl]) {
+              firstSeenDate = firstSeenDates[eventUrl];
+            }
           } else {
             // Use local storage
             isRegistered = !!registeredEvents[eventKey];
@@ -1368,13 +2104,34 @@ class RegistrationManager {
             selected: !isRegistered,
             status: 'pending',
             isRegistered: isRegistered,
-            isNew: isNew
+            isNew: isNew,
+            teamRegistered: teamRegistered, // Array of { email, registeredAt } or null
+            firstSeenDate: firstSeenDate, // { date, by } or null
+            isRecentlyAdded: isNew || isRecentlyFirstSeen(eventUrl) // For UI highlighting
           };
         });
+
+        // Record all seen events to track "first seen" dates
+        if (useGoogleSheets && scrapedEvents.length > 0) {
+          // Fire and forget - don't await
+          const eventsToRecord = scrapedEvents.filter(e => !e.isExternal && e.url);
+          googleSheetsAPI.recordSeenEvents(
+            eventsToRecord,
+            calendarId,
+            userEmail
+          ).then(result => {
+            if (result.newEvents > 0) {
+              console.log(`[GoogleSheetsAPI] Recorded ${result.newEvents} new events to SeenEvents`);
+            }
+          }).catch(err => {
+            console.error('[GoogleSheetsAPI] Failed to record seen events:', err);
+          });
+        }
 
         // Count stats
         const newCount = formattedEvents.filter(e => e.isNew).length;
         const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
+        const teamRegisteredCount = formattedEvents.filter(e => e.teamRegistered && !e.isRegistered).length;
         const availableCount = formattedEvents.filter(e => !e.isRegistered).length;
 
         // Send results back to popup
@@ -1384,7 +2141,8 @@ class RegistrationManager {
             events: formattedEvents,
             debug: debugInfo,
             newCount: newCount,
-            registeredCount: registeredCount
+            registeredCount: registeredCount,
+            teamRegisteredCount: teamRegisteredCount
           });
         } catch (error) {
           // Popup is closed, ignore
@@ -1395,8 +2153,9 @@ class RegistrationManager {
         } else {
           let statusMsg = `✓ Scan complete: ${formattedEvents.length} events found`;
           if (useGoogleSheets) {
-            if (newCount > 0) statusMsg += ` (${newCount} NEW!)`;
-            if (registeredCount > 0) statusMsg += `, ${registeredCount} already registered`;
+            if (newCount > 0) statusMsg += ` (${newCount} 🆕 NEW!)`;
+            if (teamRegisteredCount > 0) statusMsg += `, ${teamRegisteredCount} ⚡ team registered`;
+            if (registeredCount > 0) statusMsg += `, ${registeredCount} ✅ you registered`;
           }
           this.sendLog('success', statusMsg + '!');
         }
@@ -1847,6 +2606,8 @@ class RegistrationManager {
       // Try Google Sheets API first for multi-person tracking
       let seenEvents = [];
       let myRegistrations = [];
+      let teamRegistrations = {}; // Events where teammates registered but current user hasn't
+      let firstSeenDates = {}; // { url: { date, by } }
       let useGoogleSheets = false;
 
       await googleSheetsAPI.refresh(); // Refresh in case settings changed
@@ -1856,6 +2617,8 @@ class RegistrationManager {
         if (apiResult.success) {
           seenEvents = apiResult.seenEvents || [];
           myRegistrations = apiResult.myRegistrations || [];
+          teamRegistrations = apiResult.teamRegistrations || {};
+          firstSeenDates = apiResult.firstSeenDates || {};
           useGoogleSheets = true;
           this.sendLog('info', `📊 Google Sheets: ${seenEvents.length} seen events, ${myRegistrations.length} registered for ${userEmail}`);
         } else {
@@ -1867,19 +2630,42 @@ class RegistrationManager {
       const storageResult = await chrome.storage.local.get(['registeredEvents']);
       const registeredEvents = storageResult.registeredEvents || {};
 
+      // Calculate what's "new" (first seen in last 48 hours)
+      const now = new Date();
+      const newThresholdMs = 48 * 60 * 60 * 1000; // 48 hours
+      
+      const isRecentlyFirstSeen = (url) => {
+        const firstSeen = firstSeenDates[url];
+        if (!firstSeen || !firstSeen.date) return false;
+        const firstSeenDate = new Date(firstSeen.date);
+        return (now - firstSeenDate) < newThresholdMs;
+      };
+
       // Format events and check if already registered
       const formattedEvents = scrapedEvents.map(event => {
         const eventKey = event.eventId || event.url;
         const eventUrl = event.url;
         
         // Determine registration status
-        let isRegistered;
+        let isRegistered = false;
         let isNew = false;
+        let teamRegistered = null;
+        let firstSeenDate = null;
         
         if (useGoogleSheets) {
           // Use Google Sheets data - check by URL
           isRegistered = myRegistrations.includes(eventUrl);
           isNew = !seenEvents.includes(eventUrl);
+          
+          // Check if team registered but current user hasn't
+          if (teamRegistrations[eventUrl]) {
+            teamRegistered = teamRegistrations[eventUrl];
+          }
+          
+          // Get first seen date if available
+          if (firstSeenDates[eventUrl]) {
+            firstSeenDate = firstSeenDates[eventUrl];
+          }
         } else {
           // Use local storage
           isRegistered = !!registeredEvents[eventKey];
@@ -1894,13 +2680,33 @@ class RegistrationManager {
           selected: !isRegistered, // Auto-deselect already registered events
           status: 'pending',
           isRegistered: isRegistered,
-          isNew: isNew
+          isNew: isNew,
+          teamRegistered: teamRegistered,
+          firstSeenDate: firstSeenDate,
+          isRecentlyAdded: isNew || isRecentlyFirstSeen(eventUrl)
         };
       });
+
+      // Record all seen events to track "first seen" dates
+      if (useGoogleSheets && scrapedEvents.length > 0) {
+        const eventsToRecord = scrapedEvents.filter(e => e.url);
+        googleSheetsAPI.recordSeenEvents(
+          eventsToRecord,
+          calendarId,
+          userEmail
+        ).then(result => {
+          if (result.newEvents > 0) {
+            console.log(`[GoogleSheetsAPI] Recorded ${result.newEvents} new events to SeenEvents`);
+          }
+        }).catch(err => {
+          console.error('[GoogleSheetsAPI] Failed to record seen events:', err);
+        });
+      }
 
       // Count stats
       const newCount = formattedEvents.filter(e => e.isNew).length;
       const registeredCount = formattedEvents.filter(e => e.isRegistered).length;
+      const teamRegisteredCount = formattedEvents.filter(e => e.teamRegistered && !e.isRegistered).length;
 
       // Send results back to popup
       try {
@@ -1909,7 +2715,8 @@ class RegistrationManager {
           events: formattedEvents,
           debug: debugInfo,
           newCount: newCount,
-          registeredCount: registeredCount
+          registeredCount: registeredCount,
+          teamRegisteredCount: teamRegisteredCount
         });
       } catch (error) {
         // Popup is closed, ignore
@@ -1920,8 +2727,9 @@ class RegistrationManager {
       } else {
         let statusMsg = `✓ Scan complete: ${formattedEvents.length} events found`;
         if (useGoogleSheets) {
-          if (newCount > 0) statusMsg += ` (${newCount} NEW!)`;
-          if (registeredCount > 0) statusMsg += `, ${registeredCount} already registered`;
+          if (newCount > 0) statusMsg += ` (${newCount} 🆕 NEW!)`;
+          if (teamRegisteredCount > 0) statusMsg += `, ${teamRegisteredCount} ⚡ team registered`;
+          if (registeredCount > 0) statusMsg += `, ${registeredCount} ✅ you registered`;
         } else if (registeredCount > 0) {
           statusMsg = `✓ Scan complete: ${formattedEvents.filter(e => !e.isRegistered).length} new events, ${registeredCount} already registered`;
         }
@@ -3510,7 +4318,7 @@ class RegistrationManager {
       // Create a timeout promise (15 seconds for focused mode)
       // This covers the full registration flow when tab is focused
       const REGISTRATION_TIMEOUT = 15000; // 15 seconds (focused mode - fast)
-      const CLOUDFLARE_EXTENDED_TIMEOUT = 90000; // 90 seconds if Cloudflare detected
+      const CLOUDFLARE_EXTENDED_TIMEOUT = 120000; // 120 seconds (2 minutes) if Cloudflare/Turnstile detected - gives user time to complete manual verification
 
       const timeoutPromise = new Promise((resolve) => {
         setTimeout(async () => {
@@ -3524,20 +4332,81 @@ class RegistrationManager {
                 var hasCloudflare = bodyText.indexOf('verifying your browser') > -1 ||
                   bodyText.indexOf("we're doing a quick check") > -1 ||
                   bodyText.indexOf('verifying...') > -1 ||
+                  bodyText.indexOf('verify you are human') > -1 || // Turnstile checkbox
                   bodyText.indexOf('cloudflare') > -1 ||
                   bodyHTML.indexOf('cf-browser-verification') > -1 ||
                   bodyHTML.indexOf('challenge-platform') > -1 ||
-                  document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"]') !== null;
+                  bodyHTML.indexOf('turnstile') > -1 ||
+                  document.querySelector('[id*="cf-"], [class*="cf-"], [id*="challenge"], [class*="challenge"], [class*="turnstile"], iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]') !== null;
                 return hasCloudflare;
               }
             });
 
             const hasCloudflare = cloudflareCheck[0]?.result || false;
-
             if (hasCloudflare) {
-              this.sendLog('info', `  Cloudflare challenge detected - extending timeout to ${CLOUDFLARE_EXTENDED_TIMEOUT / 1000} seconds`);
-              // Extend timeout for Cloudflare - wait additional time
+              this.sendLog('info', `  Cloudflare challenge detected - attempting automatic bypass...`);
+              
+              // Try to automatically click the Turnstile checkbox using trusted events
+              let bypassSucceeded = false;
+              let bypassAttempts = 0;
+              const maxBypassAttempts = 5;
+              
+              while (bypassAttempts < maxBypassAttempts && !bypassSucceeded) {
+                bypassAttempts++;
+                this.sendLog('info', `  Turnstile bypass attempt ${bypassAttempts}/${maxBypassAttempts}...`);
+                
+                try {
+                  const bypassResult = await clickTurnstileCheckbox(tab.id);
+                  if (bypassResult.success && bypassResult.turnstileCleared) {
+                    this.sendLog('info', `  ✓ Turnstile bypass successful! Continuing registration...`);
+                    bypassSucceeded = true;
+                    // Give it a moment to process, then let registration continue normally
+                    await new Promise(r => setTimeout(r, 1000));
+                    // Don't extend timeout if bypass worked - let it complete normally
+                    return;
+                  } else if (bypassResult.success) {
+                    this.sendLog('info', `  Click sent but challenge still present, will retry...`);
+                    // Wait before retrying
+                    await new Promise(r => setTimeout(r, 3000 + Math.random() * 2000));
+                  } else {
+                    this.sendLog('warn', `  Bypass attempt failed: ${bypassResult.error || 'unknown error'}`);
+                    await new Promise(r => setTimeout(r, 2000));
+                  }
+                } catch (bypassError) {
+                  this.sendLog('warn', `  Turnstile bypass error: ${bypassError.message}`);
+                  await new Promise(r => setTimeout(r, 2000));
+                }
+              }
+              
+              // All bypass attempts failed - extend timeout for manual completion
+              this.sendLog('info', `  All ${maxBypassAttempts} bypass attempts completed - extending timeout to ${CLOUDFLARE_EXTENDED_TIMEOUT / 1000} seconds for manual verification`);
+              
+              // Start background retry loop for additional bypass attempts
+              const backgroundBypassInterval = setInterval(async () => {
+                try {
+                  // Check if Turnstile is still present
+                  const stillPresent = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    function: () => {
+                      return document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]') !== null ||
+                        (document.body.textContent || '').toLowerCase().indexOf('verify you are human') > -1;
+                    }
+                  });
+                  
+                  if (stillPresent[0]?.result) {
+                    console.log('[TurnstileBypass] Background retry - Turnstile still present, attempting click...');
+                    await clickTurnstileCheckbox(tab.id);
+                  } else {
+                    console.log('[TurnstileBypass] Background retry - Turnstile cleared, stopping retries');
+                    clearInterval(backgroundBypassInterval);
+                  }
+                } catch (e) {
+                  console.log('[TurnstileBypass] Background retry error:', e.message);
+                }
+              }, 8000); // Retry every 8 seconds
+              
               setTimeout(() => {
+                clearInterval(backgroundBypassInterval);
                 resolve({ timeout: true, cloudflare: true });
               }, CLOUDFLARE_EXTENDED_TIMEOUT - REGISTRATION_TIMEOUT);
               return; // Don't resolve yet, wait for extended timeout
@@ -3590,9 +4459,15 @@ class RegistrationManager {
                           if (url.indexOf('/event/register') > -1) {
                             response.clone().json().then(function (data) {
                               try {
+                                // #region agent log
+                                fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:network',message:'H3: Luma /event/register response',data:{dataStatus:data?data.status:'null',approvalStatus:data?data.approval_status:'null',hasData:!!data},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+                                // #endregion
                                 if (data && (data.status === 'success' || data.approval_status === 'approved')) {
                                   window.__eventAutoRegisterNetworkSuccessFlag = true;
                                   console.log('[Event Auto Register] ✓ Network registration success detected (Luma /event/register)');
+                                  // #region agent log
+                                  fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:network-success',message:'H3: Network flag SET to TRUE',data:{url:url},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+                                  // #endregion
                                 }
                               } catch (e) { }
                             }).catch(function () { });
@@ -3662,6 +4537,7 @@ class RegistrationManager {
 
                     // Create message box
                     var box = document.createElement('div');
+                    box.id = '__eventAutoRegisterOverlayBox';
                     box.style.background = 'rgba(15,23,42,0.95)';
                     box.style.color = '#e5e7eb';
                     box.style.padding = '16px 20px';
@@ -3681,6 +4557,476 @@ class RegistrationManager {
                 }
               } catch (overlayError) {
                 console.log('[Event Auto Register] Could not show helper overlay: ' + overlayError.message);
+              }
+
+              // ============================================
+              // HUMAN-LIKE TURNSTILE BYPASS FUNCTIONS
+              // ============================================
+              
+              // Generate a random number with normal distribution (more human-like)
+              var gaussianRandom = function(mean, stdDev) {
+                var u1 = Math.random();
+                var u2 = Math.random();
+                var z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+                return z0 * stdDev + mean;
+              };
+              
+              // Generate bezier curve points for natural mouse movement
+              var generateBezierPath = function(startX, startY, endX, endY, numPoints) {
+                numPoints = numPoints || 25;
+                var points = [];
+                
+                // Add some randomness to control points for natural curve
+                var cp1x = startX + (endX - startX) * 0.25 + gaussianRandom(0, 30);
+                var cp1y = startY + (endY - startY) * 0.1 + gaussianRandom(0, 30);
+                var cp2x = startX + (endX - startX) * 0.75 + gaussianRandom(0, 20);
+                var cp2y = startY + (endY - startY) * 0.9 + gaussianRandom(0, 20);
+                
+                for (var i = 0; i <= numPoints; i++) {
+                  var t = i / numPoints;
+                  // Cubic bezier formula
+                  var x = Math.pow(1-t, 3) * startX + 
+                          3 * Math.pow(1-t, 2) * t * cp1x + 
+                          3 * (1-t) * Math.pow(t, 2) * cp2x + 
+                          Math.pow(t, 3) * endX;
+                  var y = Math.pow(1-t, 3) * startY + 
+                          3 * Math.pow(1-t, 2) * t * cp1y + 
+                          3 * (1-t) * Math.pow(t, 2) * cp2y + 
+                          Math.pow(t, 3) * endY;
+                  
+                  // Add micro-jitter for realism
+                  x += gaussianRandom(0, 1);
+                  y += gaussianRandom(0, 1);
+                  
+                  points.push({ x: x, y: y });
+                }
+                return points;
+              };
+              
+              // Simulate mouse movement along a path
+              var simulateMouseMovement = function(element, callback) {
+                var rect = element.getBoundingClientRect();
+                
+                // Target position with slight randomness (don't always hit exact center)
+                var targetX = rect.left + rect.width / 2 + gaussianRandom(0, rect.width * 0.15);
+                var targetY = rect.top + rect.height / 2 + gaussianRandom(0, rect.height * 0.15);
+                
+                // Start from a random position (simulating where mouse might be)
+                var startX = gaussianRandom(window.innerWidth / 2, window.innerWidth / 4);
+                var startY = gaussianRandom(window.innerHeight / 2, window.innerHeight / 4);
+                
+                var path = generateBezierPath(startX, startY, targetX, targetY, 20 + Math.floor(Math.random() * 15));
+                var currentIndex = 0;
+                
+                var moveNext = function() {
+                  if (currentIndex >= path.length) {
+                    // Movement complete, wait a bit then callback
+                    setTimeout(callback, 50 + Math.random() * 150);
+                    return;
+                  }
+                  
+                  var point = path[currentIndex];
+                  
+                  // Dispatch mousemove event
+                  var moveEvent = new MouseEvent('mousemove', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    clientX: point.x,
+                    clientY: point.y,
+                    screenX: point.x,
+                    screenY: point.y
+                  });
+                  document.elementFromPoint(point.x, point.y)?.dispatchEvent(moveEvent);
+                  document.dispatchEvent(moveEvent);
+                  
+                  currentIndex++;
+                  
+                  // Variable delay between movements (faster in middle, slower at start/end)
+                  var progress = currentIndex / path.length;
+                  var baseDelay = 8 + Math.random() * 12;
+                  var delay = baseDelay * (1 + Math.sin(progress * Math.PI) * 0.5);
+                  
+                  setTimeout(moveNext, delay);
+                };
+                
+                // Start movement after a small initial delay
+                setTimeout(moveNext, 100 + Math.random() * 200);
+              };
+              
+              // Perform a human-like click on an element
+              var humanLikeClick = function(element, callback) {
+                var rect = element.getBoundingClientRect();
+                var clickX = rect.left + rect.width / 2 + gaussianRandom(0, rect.width * 0.1);
+                var clickY = rect.top + rect.height / 2 + gaussianRandom(0, rect.height * 0.1);
+                
+                console.log('[Event Auto Register] 🖱️ Performing human-like click at (' + Math.round(clickX) + ', ' + Math.round(clickY) + ')');
+                
+                // Add some pre-click behaviors for realism
+                try {
+                  // Focus the element if it's focusable
+                  if (element.focus && typeof element.focus === 'function') {
+                    element.focus();
+                  }
+                  
+                  // Dispatch mouseenter and mouseover first
+                  var enterEvent = new MouseEvent('mouseenter', {
+                    bubbles: false,
+                    cancelable: false,
+                    view: window,
+                    clientX: clickX,
+                    clientY: clickY
+                  });
+                  element.dispatchEvent(enterEvent);
+                  
+                  var overEvent = new MouseEvent('mouseover', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    clientX: clickX,
+                    clientY: clickY
+                  });
+                  element.dispatchEvent(overEvent);
+                } catch (e) {
+                  console.log('[Event Auto Register] Pre-click events failed (continuing):', e.message);
+                }
+                
+                // Small delay after hover before clicking
+                setTimeout(function() {
+                  // Pointer down event (modern)
+                  try {
+                    var pointerDownEvent = new PointerEvent('pointerdown', {
+                      bubbles: true,
+                      cancelable: true,
+                      view: window,
+                      button: 0,
+                      buttons: 1,
+                      clientX: clickX,
+                      clientY: clickY,
+                      screenX: clickX,
+                      screenY: clickY,
+                      pointerId: 1,
+                      pointerType: 'mouse',
+                      isPrimary: true,
+                      pressure: 0.5
+                    });
+                    element.dispatchEvent(pointerDownEvent);
+                  } catch (e) {
+                    // PointerEvent not supported, skip
+                  }
+                  
+                  // Mouse down
+                  var mouseDownEvent = new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    buttons: 1,
+                    clientX: clickX,
+                    clientY: clickY,
+                    screenX: clickX,
+                    screenY: clickY
+                  });
+                  element.dispatchEvent(mouseDownEvent);
+                  
+                  // Small delay between mousedown and mouseup (human finger press duration)
+                  var pressDuration = 50 + Math.random() * 100; // 50-150ms
+                  setTimeout(function() {
+                    // Pointer up
+                    try {
+                      var pointerUpEvent = new PointerEvent('pointerup', {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        button: 0,
+                        buttons: 0,
+                        clientX: clickX,
+                        clientY: clickY,
+                        screenX: clickX,
+                        screenY: clickY,
+                        pointerId: 1,
+                        pointerType: 'mouse',
+                        isPrimary: true
+                      });
+                      element.dispatchEvent(pointerUpEvent);
+                    } catch (e) {
+                      // PointerEvent not supported, skip
+                    }
+                    
+                    // Mouse up
+                    var mouseUpEvent = new MouseEvent('mouseup', {
+                      bubbles: true,
+                      cancelable: true,
+                      view: window,
+                      button: 0,
+                      buttons: 0,
+                      clientX: clickX,
+                      clientY: clickY,
+                      screenX: clickX,
+                      screenY: clickY
+                    });
+                    element.dispatchEvent(mouseUpEvent);
+                    
+                    // Click event
+                    var clickEvent = new MouseEvent('click', {
+                      bubbles: true,
+                      cancelable: true,
+                      view: window,
+                      button: 0,
+                      clientX: clickX,
+                      clientY: clickY,
+                      screenX: clickX,
+                      screenY: clickY
+                    });
+                    element.dispatchEvent(clickEvent);
+                    
+                    // Also try native click as fallback
+                    try {
+                      if (element.click && typeof element.click === 'function') {
+                        element.click();
+                      }
+                    } catch (e) {
+                      // Native click not available
+                    }
+                    
+                    console.log('[Event Auto Register] ✓ Click events dispatched');
+                    
+                    if (callback) {
+                      setTimeout(callback, 100 + Math.random() * 200);
+                    }
+                  }, pressDuration);
+                }, 30 + Math.random() * 70); // Small hover delay before clicking
+              };
+              
+              // Find and click the Turnstile checkbox
+              var attemptTurnstileBypass = function(callback) {
+                console.log('[Event Auto Register] 🔄 Attempting automatic Turnstile bypass...');
+                
+                // Update overlay to show we're attempting bypass
+                var box = document.getElementById('__eventAutoRegisterOverlayBox');
+                if (box) {
+                  box.innerHTML = '<div style="color:#60a5fa;font-weight:bold;margin-bottom:8px;">🔄 ATTEMPTING CAPTCHA BYPASS</div>' +
+                    'Simulating human-like interaction with the verification checkbox...';
+                  box.style.borderLeft = '4px solid #60a5fa';
+                }
+                
+                // Try to find the Turnstile checkbox
+                // Method 1: Look for the iframe and try to interact with it
+                var turnstileIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]');
+                
+                if (turnstileIframe) {
+                  console.log('[Event Auto Register] Found Turnstile iframe, attempting to click it...');
+                  
+                  // We can't access inside the iframe due to cross-origin, but we can click ON the iframe
+                  // The checkbox is typically in a specific position within the iframe
+                  
+                  // First, simulate mouse movement toward the iframe
+                  simulateMouseMovement(turnstileIframe, function() {
+                    console.log('[Event Auto Register] Mouse movement complete, clicking...');
+                    
+                    // The checkbox is typically in the left portion of the iframe
+                    var iframeRect = turnstileIframe.getBoundingClientRect();
+                    
+                    // Create a virtual target for the checkbox (usually left side of iframe)
+                    var checkboxTarget = {
+                      getBoundingClientRect: function() {
+                        return {
+                          left: iframeRect.left + 15,
+                          top: iframeRect.top + iframeRect.height / 2 - 10,
+                          width: 20,
+                          height: 20,
+                          right: iframeRect.left + 35,
+                          bottom: iframeRect.top + iframeRect.height / 2 + 10
+                        };
+                      },
+                      dispatchEvent: function(e) { return turnstileIframe.dispatchEvent(e); }
+                    };
+                    
+                    humanLikeClick(checkboxTarget, function() {
+                      console.log('[Event Auto Register] Turnstile click attempted');
+                      if (callback) callback(true);
+                    });
+                  });
+                  return;
+                }
+                
+                // Method 2: Look for any visible checkbox-like element related to verification
+                var verifyElements = document.querySelectorAll('[class*="checkbox"], [type="checkbox"], [role="checkbox"], input[type="checkbox"]');
+                for (var i = 0; i < verifyElements.length; i++) {
+                  var el = verifyElements[i];
+                  if (el.offsetParent !== null) { // Is visible
+                    console.log('[Event Auto Register] Found checkbox element, clicking...');
+                    simulateMouseMovement(el, function() {
+                      humanLikeClick(el, function() {
+                        if (callback) callback(true);
+                      });
+                    });
+                    return;
+                  }
+                }
+                
+                // Method 3: Look for "verify" text and click near it
+                var allElements = document.querySelectorAll('*');
+                for (var j = 0; j < allElements.length; j++) {
+                  var elem = allElements[j];
+                  var text = (elem.textContent || '').toLowerCase();
+                  if ((text.indexOf('verify you are human') > -1 || text.indexOf('i am human') > -1) && 
+                      elem.offsetParent !== null &&
+                      elem.children.length === 0) { // Leaf element
+                    console.log('[Event Auto Register] Found verify text element, clicking nearby...');
+                    simulateMouseMovement(elem, function() {
+                      humanLikeClick(elem, function() {
+                        if (callback) callback(true);
+                      });
+                    });
+                    return;
+                  }
+                }
+                
+                console.log('[Event Auto Register] Could not find Turnstile checkbox element');
+                if (callback) callback(false);
+              };
+
+              // Function to detect Turnstile checkbox and attempt bypass
+              var checkForTurnstileCheckbox = function() {
+                try {
+                  var turnstileIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]');
+                  var bodyText = (document.body.textContent || '').toLowerCase();
+                  var hasTurnstileCheckbox = turnstileIframe !== null || 
+                    bodyText.indexOf('verify you are human') > -1 ||
+                    bodyText.indexOf('verifying your browser') > -1;
+                  
+                  if (hasTurnstileCheckbox) {
+                    console.log('[Event Auto Register] ⚠️ Turnstile CAPTCHA detected - attempting automatic bypass...');
+                    
+                    // Attempt automatic bypass first
+                    attemptTurnstileBypass(function(clicked) {
+                      if (!clicked) {
+                        // If auto-click failed, show manual instruction
+                        var box = document.getElementById('__eventAutoRegisterOverlayBox');
+                        if (box) {
+                          box.innerHTML = '<div style="color:#fbbf24;font-weight:bold;margin-bottom:8px;">⚠️ CAPTCHA VERIFICATION REQUIRED</div>' +
+                            'Auto-bypass failed. Please click the "Verify you are human" checkbox manually.';
+                          box.style.borderLeft = '4px solid #fbbf24';
+                        }
+                      }
+                    });
+                    
+                    return true;
+                  }
+                  return false;
+                } catch (e) {
+                  console.log('[Event Auto Register] Error checking for Turnstile:', e);
+                  return false;
+                }
+              };
+
+              // Function to wait for Turnstile to be completed (with periodic retry)
+              var waitForTurnstileCompletion = function(callback, maxAttempts) {
+                maxAttempts = maxAttempts || 120; // Wait up to 60 seconds (120 * 500ms)
+                var attempts = 0;
+                var bypassAttempts = 0;
+                var maxBypassAttempts = 5; // Try bypass up to 5 times
+                var lastBypassAttempt = 0;
+                var bypassRetryInterval = 8; // Retry bypass every ~4 seconds (8 * 500ms)
+                
+                var checkComplete = function() {
+                  attempts++;
+                  var bodyText = (document.body.textContent || '').toLowerCase();
+                  var bodyHTML = (document.body.innerHTML || '').toLowerCase();
+                  
+                  // Check if Turnstile is still present
+                  var stillHasTurnstile = bodyText.indexOf('verify you are human') > -1 ||
+                    bodyText.indexOf('verifying your browser') > -1 ||
+                    bodyText.indexOf('verifying...') > -1 ||
+                    bodyHTML.indexOf('challenges.cloudflare.com') > -1 ||
+                    document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]') !== null;
+                  
+                  // Check if we have success indicators
+                  var hasSuccess = bodyText.indexOf("you're in") > -1 ||
+                    bodyText.indexOf("you're going") > -1 ||
+                    bodyText.indexOf("pending approval") > -1 ||
+                    bodyText.indexOf("you're on the waitlist") > -1 ||
+                    bodyText.indexOf("ticket confirmed") > -1 ||
+                    (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag);
+                  
+                  if (hasSuccess) {
+                    console.log('[Event Auto Register] ✓ Success detected while waiting for Turnstile');
+                    callback(true, 'success');
+                    return;
+                  }
+                  
+                  if (!stillHasTurnstile) {
+                    console.log('[Event Auto Register] ✓ Turnstile completed (attempt ' + attempts + ')');
+                    // Restore normal overlay message
+                    var box = document.getElementById('__eventAutoRegisterOverlayBox');
+                    if (box) {
+                      box.innerHTML = 'Event Auto Register is filling this form. For best results, avoid editing fields until it finishes. To pause or stop, click the extension icon in Chrome\'s toolbar.';
+                      box.style.borderLeft = 'none';
+                    }
+                    callback(true, 'completed');
+                    return;
+                  }
+                  
+                  // Periodically retry the bypass if Turnstile is still present
+                  if (stillHasTurnstile && 
+                      bypassAttempts < maxBypassAttempts && 
+                      (attempts - lastBypassAttempt) >= bypassRetryInterval) {
+                    bypassAttempts++;
+                    lastBypassAttempt = attempts;
+                    console.log('[Event Auto Register] 🔄 Retrying Turnstile bypass (attempt ' + bypassAttempts + '/' + maxBypassAttempts + ')');
+                    
+                    // Update overlay
+                    var box = document.getElementById('__eventAutoRegisterOverlayBox');
+                    if (box) {
+                      box.innerHTML = '<div style="color:#60a5fa;font-weight:bold;margin-bottom:8px;">🔄 RETRYING CAPTCHA BYPASS</div>' +
+                        'Attempt ' + bypassAttempts + ' of ' + maxBypassAttempts + '... Please wait or click manually if needed.';
+                      box.style.borderLeft = '4px solid #60a5fa';
+                    }
+                    
+                    // Attempt bypass again
+                    attemptTurnstileBypass(function(clicked) {
+                      if (!clicked && bypassAttempts >= maxBypassAttempts) {
+                        // All bypass attempts failed, show manual instruction
+                        var box = document.getElementById('__eventAutoRegisterOverlayBox');
+                        if (box) {
+                          box.innerHTML = '<div style="color:#fbbf24;font-weight:bold;margin-bottom:8px;">⚠️ AUTO-BYPASS FAILED</div>' +
+                            'Please click the "Verify you are human" checkbox manually to continue.';
+                          box.style.borderLeft = '4px solid #fbbf24';
+                        }
+                      }
+                    });
+                  }
+                  
+                  if (attempts >= maxAttempts) {
+                    console.log('[Event Auto Register] ⚠️ Turnstile still present after ' + maxAttempts + ' attempts');
+                    callback(false, 'timeout');
+                    return;
+                  }
+                  
+                  // Keep polling
+                  setTimeout(checkComplete, 500);
+                };
+                
+                checkComplete();
+              };
+
+              // Initial check for Turnstile - if present, wait for user to complete it
+              if (checkForTurnstileCheckbox()) {
+                console.log('[Event Auto Register] Waiting for user to complete Turnstile verification...');
+                waitForTurnstileCompletion(function(completed, reason) {
+                  if (completed && reason === 'success') {
+                    console.log('[Event Auto Register] ✓ Registration already succeeded during Turnstile wait!');
+                    resolve({ success: true, message: 'Registered successfully (completed during verification)' });
+                  } else if (completed) {
+                    console.log('[Event Auto Register] ✓ Turnstile completed, continuing with registration...');
+                    // Continue with the rest of the registration logic below
+                  } else {
+                    console.log('[Event Auto Register] ⚠️ Turnstile verification timed out - registration may not complete');
+                    // Continue anyway, will likely fail but user can see the issue
+                  }
+                }, 120);
+                // Don't return here - let the registration continue
               }
 
               // Look for registration button - patterns vary by platform
@@ -12879,6 +14225,18 @@ class RegistrationManager {
                             // Wait for submission to process
                             setTimeout(function () {
                               console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT ===');
+                              
+                              // FIX H3: IMMEDIATELY check network flag FIRST before anything else
+                              // This handles the race condition where API response comes in fast
+                              if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                                console.log('[Event Auto Register] ✓ Network success flag already TRUE - immediate success!');
+                                // #region agent log
+                                fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:12896-immediate',message:'H3: Network flag TRUE - immediate success',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+                                // #endregion
+                                resolve({ success: true, message: 'Registered successfully (network confirmed)' });
+                                return;
+                              }
+                              
                               var bodyText = document.body.textContent;
 
                               // Check for validation errors - prioritize red borders (most reliable)
@@ -13246,6 +14604,10 @@ class RegistrationManager {
                                 success = true;
                               }
 
+                              // #region agent log
+                              fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:13262',message:'H2/H3/H4: Final success check result',data:{success:success,foundPhrase:foundPhrase,hasValidationErrors:hasValidationErrors,networkFlag:!!(typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag),fieldsToFillCount:fieldsToFill.length,pageTextSample:(bodyText||'').substring(0,200)},timestamp:Date.now(),hypothesisId:'H2,H3,H4'})}).catch(function(){});
+                              // #endregion
+
                               if (success) {
                                 console.log('[Event Auto Register] ✓✓✓ REGISTRATION SUCCESSFUL!');
                                 var message = 'Registered successfully';
@@ -13357,21 +14719,70 @@ class RegistrationManager {
                         // Don't check for validation errors too quickly as React might still be processing
                         setTimeout(function () {
                           console.log('[Event Auto Register] === CHECKING REGISTRATION RESULT ===');
+                          
+                          // FIX H3: IMMEDIATELY check network flag FIRST before anything else
+                          if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                            console.log('[Event Auto Register] ✓ Network success flag already TRUE - immediate success!');
+                            // #region agent log
+                            fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:13377-immediate',message:'H3: Network flag TRUE - immediate success',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+                            // #endregion
+                            resolve({ success: true, message: 'Registered successfully (network confirmed)' });
+                            return;
+                          }
+                          
                           var bodyText = document.body.textContent;
 
+                          // SECOND: Wait for network flag (async response may be in-flight)
+                          // This fixes the race condition where network success comes after we check
+                          // IMPORTANT: When Cloudflare is present, network response can take 5+ seconds
+                          var waitForNetworkFirst = function(callback, attempts) {
+                            attempts = attempts || 0;
+                            if (typeof window !== 'undefined' && window.__eventAutoRegisterNetworkSuccessFlag) {
+                              console.log('[Event Auto Register] ✓ Network success flag detected early (attempt ' + attempts + ')');
+                              callback(true);
+                              return;
+                            }
+                            // Wait up to 8 seconds (16 * 500ms) to handle Cloudflare delays
+                            if (attempts < 16) {
+                              setTimeout(function() { waitForNetworkFirst(callback, attempts + 1); }, 500);
+                            } else {
+                              callback(false);
+                            }
+                          };
+                          
+                          waitForNetworkFirst(function(networkSuccessEarly) {
+                          // If network success was detected during wait, immediately return success
+                          if (networkSuccessEarly) {
+                            // #region agent log
+                            fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:waitForNetwork-success',message:'H3: Network flag detected during wait - success',data:{},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+                            // #endregion
+                            resolve({ success: true, message: 'Registered successfully (network confirmed)' });
+                            return;
+                          }
                           // Check for validation errors first (but only after giving React time to process)
                           var validationErrors = document.querySelectorAll('[class*="error"], [class*="Error"], [class*="invalid"], [class*="Invalid"], [aria-invalid="true"]');
                           var errorMessages = document.querySelectorAll('*');
                           var hasValidationErrors = false;
                           var missingFields = [];
+                          // #region agent log
+                          var errorElsDebug = [];
+                          for (var ve = 0; ve < validationErrors.length && ve < 5; ve++) {
+                            var errTextTrim = (validationErrors[ve].textContent || '').trim();
+                            errorElsDebug.push({tagName: validationErrors[ve].tagName, className: validationErrors[ve].className, text: errTextTrim.substring(0, 50), isEmpty: errTextTrim.length === 0});
+                          }
+                          fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:injected:13378',message:'H2: Error elements found by selector',data:{count:validationErrors.length,samples:errorElsDebug,networkSuccessEarly:networkSuccessEarly},timestamp:Date.now(),hypothesisId:'H2'})}).catch(function(){});
+                          // #endregion
 
-                          // Look for "This field is required" or similar error messages
+                          // FIX H2: Only count validation errors if they have ACTUAL error text content
+                          // Empty error placeholder divs (like Luma's "text-error" divs) should be ignored
                           for (var err = 0; err < errorMessages.length; err++) {
                             var errEl = errorMessages[err];
-                            var errText = (errEl.textContent || '').toLowerCase();
-                            if (errText.indexOf('this field is required') > -1 ||
+                            var errText = (errEl.textContent || '').trim().toLowerCase();
+                            // IMPORTANT: Only consider it an error if there's actual text
+                            if (errText.length > 0 && (
+                              errText.indexOf('this field is required') > -1 ||
                               errText.indexOf('field is required') > -1 ||
-                              errText.indexOf('required') > -1 && errText.indexOf('field') > -1) {
+                              (errText.indexOf('required') > -1 && errText.indexOf('field') > -1))) {
                               hasValidationErrors = true;
                               // Find the associated input field
                               var inputField = errEl.closest('div, form, section')?.querySelector('input[type="text"], input:not([type]), [role="combobox"]');
@@ -13723,6 +15134,7 @@ class RegistrationManager {
                             };
                             pollForNetworkFlag();
                           }
+                          }); // End of waitForNetworkFirst callback
                         }, 4000); // Wait 4 seconds for submission to complete
 
                       }); // End of checkForTermsModalAndWait callback
@@ -13773,6 +15185,9 @@ class RegistrationManager {
             }
           } else {
             // No Cloudflare, timeout reached
+            // #region agent log
+            fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:13801',message:'H1: TIMEOUT reached (no Cloudflare) - marking as FAILED',data:{eventTitle:event.title,timeoutMs:REGISTRATION_TIMEOUT},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+            // #endregion
             event.status = 'failed';
             event.message = `Registration timed out after ${REGISTRATION_TIMEOUT / 1000} seconds`;
             this.stats.failed++;
@@ -13782,6 +15197,9 @@ class RegistrationManager {
           }
         } else {
           // Registration completed before timeout - use the result
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/e27bf4d4-fee1-46e8-bd3c-d5136e91d0c5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'background.js:13811',message:'H1: Registration completed BEFORE timeout',data:{eventTitle:event.title,resultSuccess:raceResult && raceResult[0] && raceResult[0].result ? raceResult[0].result.success : 'unknown'},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+          // #endregion
           result = raceResult;
         }
       } catch (error) {
@@ -14009,6 +15427,10 @@ class RegistrationManager {
           // Store tab ID in result so dashboard can show it
           event.tabId = tab.id;
           this.sendLog('info', `  Tab ${tab.id} kept open for: ${event.title}`);
+          
+          // Schedule delayed re-verification (20 seconds later)
+          // This catches cases where the page was still loading when we checked
+          this.scheduleReverification(tab.id, event);
         }
       }
 
@@ -14054,6 +15476,9 @@ class RegistrationManager {
   stopRegistration() {
     this.processing = false;
     this.paused = false;
+
+    // Cancel any pending re-verifications
+    this.cancelAllReverifications();
 
     // Do NOT close any event tabs on stop; leave them open for review
     // Just clear active tab tracking so the queue won't keep using them
@@ -14376,6 +15801,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           await debugLogger.clearLogs();
           sendResponse({ success: true });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true; // Keep channel open for async response
+    
+    case 'RECHECK_FAILED_TABS':
+      (async () => {
+        try {
+          const result = await manager.recheckAllFailedTabs();
+          sendResponse({ success: true, ...result });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true; // Keep channel open for async response
+    
+    case 'RECHECK_SINGLE_TAB':
+      (async () => {
+        try {
+          const result = await manager.recheckSingleTab(message.url, message.tabId);
+          sendResponse({ success: true, ...result });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true; // Keep channel open for async response
+    
+    case 'MARK_AS_REGISTERED':
+      (async () => {
+        try {
+          const result = await manager.markEventAsRegistered(message.url, message.tabId);
+          sendResponse({ success: true, ...result });
         } catch (error) {
           sendResponse({ success: false, error: error.message });
         }
